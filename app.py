@@ -39,26 +39,34 @@ def hex_to_rgb(hex_color):
 # --- AI AUTOFOCUS & POLISH LOGIC ---
 def auto_fill_with_ai(text, merge=False):
     if merge:
+        # Load the existing data so the AI knows exactly what is already on the resume
         baseline_data = {k: v for k, v in st.session_state.r_data.items() if k != 'photo_bytes'}
     else:
+        # Fresh start
         baseline_data = {
             "name": "", "address": "", "phone": "", "email": "", "linkedin": "",
-            "summary": "", "education": [], "experience":[], "projects": [], "leadership":[],
+            "summary": "", "education": [], "experience":[], "projects":[], "leadership":[],
             "skills": {"technical": "", "languages": "", "interests": ""},
             "custom_sections":[]
         }
         
     prompt = f"""
-    You are an expert resume parser. Extract the details from the NEW RAW TEXT and intelligently merge them into the BASELINE JSON.
-    Append new jobs/education/projects to the lists. Do not duplicate.
+    You are an advanced AI resume compiler. 
+    Your task is to take the BASELINE JSON (the current state) and the NEW RAW INPUT (uploaded text / newly pasted text), and intelligently process them.
     
     BASELINE JSON:
     {json.dumps(baseline_data)}
     
-    NEW RAW TEXT:
+    NEW RAW INPUT:
     {text}
     
-    Strict JSON Structure required:
+    CRITICAL MERGE RULES:
+    1. If the BASELINE JSON is empty, extract all details from the NEW RAW INPUT to populate the JSON.
+    2. If the BASELINE JSON already has data, PRESERVE IT! Add new information from the NEW RAW INPUT without overwriting existing valid data.
+    3. DO NOT DUPLICATE jobs, schools, or projects. If a job/school in the NEW RAW INPUT matches one in the BASELINE JSON, combine their bullet points and details.
+    4. If the NEW RAW INPUT contains explicit small additions (e.g. "Add Python to my skills" or "Add a new bullet to my current job"), follow them precisely by appending to the relevant section.
+    
+    Strict JSON Structure required (Return ONLY this exact structure, with all keys present):
     {{
       "name": "Full Name", "address": "City, State", "phone": "Phone", "email": "Email", "linkedin": "URL",
       "summary": "Brief professional summary or objective",
@@ -66,14 +74,14 @@ def auto_fill_with_ai(text, merge=False):
       "experience":[{{"company": "", "location": "", "title": "", "date": "", "bullets": "bullet 1\\nbullet 2"}}],
       "projects":[{{"title": "", "date": "", "role": "", "bullets": ""}}],
       "leadership":[{{"organization": "", "location": "", "title": "", "date": "", "bullets": ""}}],
-      "skills": {{"technical": "", "languages": "", "interests": ""}},
+      "skills": {{"technical": "comma separated", "languages": "comma separated", "interests": "comma separated"}},
       "custom_sections":[{{"title": "", "content": ""}}]
     }}
     """
     try:
         completion = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=[{"role": "system", "content": "You are a precise JSON parsing API."}, {"role": "user", "content": prompt}],
+            messages=[{"role": "system", "content": "You are a precise JSON compiling API. Return only JSON."}, {"role": "user", "content": prompt}],
             temperature=0, response_format={"type": "json_object"}
         )
         parsed_data = json.loads(completion.choices[0].message.content)
@@ -86,6 +94,7 @@ def auto_fill_with_ai(text, merge=False):
         custom_ids =[]
         if 'custom_sections' in parsed_data:
             for cs in parsed_data['custom_sections']:
+                # Retain ID if updating, otherwise give a new ID
                 cid = cs.get('id', str(uuid.uuid4().hex))
                 cs['id'] = cid
                 custom_ids.append(f"custom_{cid}")
@@ -93,8 +102,17 @@ def auto_fill_with_ai(text, merge=False):
         st.session_state.r_data = parsed_data
         st.session_state.r_data['photo_bytes'] = preserved_photo
         
+        # Logic to ensure the UI order list matches the newly merged data
         if not merge:
             st.session_state.section_order =['core_Summary', 'core_Education', 'core_Experience', 'core_Projects', 'core_Leadership'] + custom_ids + ['core_Skills']
+        else:
+            # If we merged and the AI created a NEW custom section, make sure we add it to the UI order!
+            for cid_str in custom_ids:
+                if cid_str not in st.session_state.section_order:
+                    # Insert right before skills
+                    idx = st.session_state.section_order.index('core_Skills') if 'core_Skills' in st.session_state.section_order else len(st.session_state.section_order)
+                    st.session_state.section_order.insert(idx, cid_str)
+                    
         return True
     except Exception as e:
         st.error(f"Failed to parse AI response: {e}")
@@ -255,7 +273,7 @@ def generate_harvard_pdf(data, settings):
             pdf.ln(0.1)
 
         # Experience / Leadership shared logic
-        elif sec_key in['core_Experience', 'core_Leadership']:
+        elif sec_key in ['core_Experience', 'core_Leadership']:
             list_key = 'experience' if sec_key == 'core_Experience' else 'leadership'
             name_key = 'company' if sec_key == 'core_Experience' else 'organization'
             if any(item.get(name_key) for item in data.get(list_key,[])):
@@ -361,17 +379,30 @@ st.title("🎓 The Ultimate Harvard Resume Builder")
 st.markdown("### 📄 Step 1: Import Your Data")
 col_pdf, col_text = st.columns(2)
 with col_pdf: uploaded_file = st.file_uploader("1️⃣ Upload Old Resume (PDF)", type="pdf")
-with col_text: pasted_text = st.text_area("2️⃣ Or Paste Text (LinkedIn, Job Spec)", height=100)
+with col_text: pasted_text = st.text_area("2️⃣ Or Paste Text (LinkedIn, Job Spec, or Additions)", height=100)
 
 def process_input(merge):
     combined = ""
+    
     if uploaded_file:
-        for page in PyPDF2.PdfReader(uploaded_file).pages: combined += page.extract_text() + "\n"
-    if pasted_text: combined += "\n" + pasted_text
-    if combined:
+        try:
+            uploaded_file.seek(0) # BUG FIX: Ensure the file is read from the beginning every time!
+            for page in PyPDF2.PdfReader(uploaded_file).pages: 
+                combined += page.extract_text() + "\n"
+        except Exception as e:
+            st.error(f"Error reading PDF: {e}")
+            
+    if pasted_text: 
+        # BUG FIX: Clearly label the pasted text so the AI doesn't ignore it during a merge!
+        combined += "\n\n--- NEW ADDITIONAL INSTRUCTIONS / TEXT ---\n" + pasted_text 
+        
+    if combined.strip():
         with st.spinner("⚡ Groq AI parsing data..."):
-            if auto_fill_with_ai(combined, merge=merge): st.success("Done!"); st.rerun()
-    else: st.warning("Upload or paste text first.")
+            if auto_fill_with_ai(combined, merge=merge): 
+                st.success("Done!")
+                st.rerun()
+    else: 
+        st.warning("Upload or paste text first.")
 
 col_b1, col_b2, _ = st.columns([1, 1, 2])
 with col_b1:
