@@ -1,7 +1,7 @@
 import streamlit as st
 import streamlit.components.v1 as components
 import PyPDF2
-from fpdf import FPDF # Using fpdf2
+from fpdf import FPDF 
 from PIL import Image
 import base64
 import json
@@ -43,7 +43,7 @@ def auto_fill_with_ai(text, merge=False):
     else:
         baseline_data = {
             "name": "", "address": "", "phone": "", "email": "", "linkedin": "",
-            "education": [], "experience":[], "projects": [], "leadership":[],
+            "summary": "", "education": [], "experience":[], "projects": [], "leadership":[],
             "skills": {"technical": "", "languages": "", "interests": ""},
             "custom_sections":[]
         }
@@ -61,6 +61,7 @@ def auto_fill_with_ai(text, merge=False):
     Strict JSON Structure required:
     {{
       "name": "Full Name", "address": "City, State", "phone": "Phone", "email": "Email", "linkedin": "URL",
+      "summary": "Brief professional summary or objective",
       "education":[{{"school": "", "location": "", "degree": "", "date": "", "details": ""}}],
       "experience":[{{"company": "", "location": "", "title": "", "date": "", "bullets": "bullet 1\\nbullet 2"}}],
       "projects":[{{"title": "", "date": "", "role": "", "bullets": ""}}],
@@ -79,7 +80,7 @@ def auto_fill_with_ai(text, merge=False):
         
         # Preserve existing UI settings & photo
         preserved_photo = st.session_state.r_data.get('photo_bytes')
-        for key in['heading_education', 'heading_experience', 'heading_projects', 'heading_leadership', 'heading_skills']:
+        for key in['heading_summary', 'heading_education', 'heading_experience', 'heading_projects', 'heading_leadership', 'heading_skills']:
             parsed_data[key] = st.session_state.r_data.get(key, key.split('_')[1].capitalize())
             
         custom_ids =[]
@@ -93,7 +94,7 @@ def auto_fill_with_ai(text, merge=False):
         st.session_state.r_data['photo_bytes'] = preserved_photo
         
         if not merge:
-            st.session_state.section_order =['core_Education', 'core_Experience', 'core_Projects', 'core_Leadership'] + custom_ids + ['core_Skills']
+            st.session_state.section_order =['core_Summary', 'core_Education', 'core_Experience', 'core_Projects', 'core_Leadership'] + custom_ids + ['core_Skills']
         return True
     except Exception as e:
         st.error(f"Failed to parse AI response: {e}")
@@ -113,7 +114,6 @@ def polish_bullet_with_ai(text):
             messages=[{"role": "user", "content": prompt}],
             temperature=0.5
         )
-        # Strip thinking tags or markdown code blocks if the AI adds them
         content = completion.choices[0].message.content.strip()
         return re.sub(r'```[a-zA-Z]*\n|```', '', content).strip()
     except Exception as e:
@@ -182,7 +182,7 @@ def generate_harvard_pdf(data, settings):
     pdf.set_text_color(0, 0, 0)
     
     pdf.set_font(font_fam, "", base_font)
-    contact_parts = [p for p in [data['address'], data['phone'], data['email'], clean_url(data.get('linkedin', ''))] if p.strip()]
+    contact_parts =[p for p in [data['address'], data['phone'], data['email'], clean_url(data.get('linkedin', ''))] if p.strip()]
     pdf.cell(w=0, h=0.2, text=sanitize("  |  ".join(contact_parts)), align=header_align, new_x="LMARGIN", new_y="NEXT")
     pdf.ln(0.1)
     
@@ -227,15 +227,22 @@ def generate_harvard_pdf(data, settings):
             orig_lmargin = pdf.l_margin
             pdf.set_left_margin(orig_lmargin + 0.25)
             pdf.set_x(orig_lmargin + 0.25)
-            # fpdf2 Markdown support for bolding!
             pdf.multi_cell(w=0, h=0.2 * spacing, text=bullet, markdown=True, new_x="LMARGIN", new_y="NEXT")
             pdf.set_left_margin(orig_lmargin)
             pdf.set_x(orig_lmargin)
 
     # Render Sections
     for sec_key in settings['section_order']:
+        
+        # Summary Section
+        if sec_key == 'core_Summary' and data.get('summary', '').strip():
+            add_section_header(data.get('heading_summary', 'Professional Summary'))
+            pdf.set_font(font_fam, "", base_font)
+            pdf.multi_cell(w=0, h=0.2 * spacing, text=sanitize(data['summary']), markdown=True, new_x="LMARGIN", new_y="NEXT")
+            pdf.ln(0.1)
+
         # Education
-        if sec_key == 'core_Education' and any(ed['school'] for ed in data.get('education',[])):
+        elif sec_key == 'core_Education' and any(ed['school'] for ed in data.get('education',[])):
             add_section_header(data.get('heading_education', 'Education'))
             for ed in data['education']:
                 if not ed['school']: continue
@@ -305,10 +312,10 @@ st.set_page_config(page_title="Harvard Resume Builder", layout="wide")
 # Init Session State
 if 'r_data' not in st.session_state:
     st.session_state.r_data = {
-        'name': '', 'address': '', 'phone': '', 'email': '', 'linkedin': '',
-        'heading_education': 'Education', 'heading_experience': 'Experience', 
-        'heading_projects': 'Projects', 'heading_leadership': 'Leadership & Extracurriculars', 
-        'heading_skills': 'Skills',
+        'name': '', 'address': '', 'phone': '', 'email': '', 'linkedin': '', 'summary': '',
+        'heading_summary': 'Professional Summary', 'heading_education': 'Education', 
+        'heading_experience': 'Experience', 'heading_projects': 'Projects', 
+        'heading_leadership': 'Leadership & Extracurriculars', 'heading_skills': 'Skills',
         'education':[{'school': '', 'location': '', 'degree': '', 'date': '', 'details': ''}],
         'experience':[{'company': '', 'location': '', 'title': '', 'date': '', 'bullets': ''}],
         'projects':[], 'leadership':[],
@@ -317,7 +324,7 @@ if 'r_data' not in st.session_state:
     }
 
 if 'section_order' not in st.session_state:
-    st.session_state.section_order =['core_Education', 'core_Experience', 'core_Projects', 'core_Leadership', 'core_Skills']
+    st.session_state.section_order =['core_Summary', 'core_Education', 'core_Experience', 'core_Projects', 'core_Leadership', 'core_Skills']
 
 if 'pdf_preview_bytes' not in st.session_state: st.session_state.pdf_preview_bytes = None
 if 'page_count_warning' not in st.session_state: st.session_state.page_count_warning = False
@@ -327,22 +334,24 @@ with st.sidebar:
     st.header("💾 Save / Load Project")
     st.info("Don't lose your progress! Save your resume data to your computer, and load it later.")
     
-    # Download JSON
     clean_data = {k: v for k, v in st.session_state.r_data.items() if k != 'photo_bytes'}
     json_str = json.dumps(clean_data, indent=2)
     st.download_button("⬇️ Download Resume Data (.json)", data=json_str, file_name="my_resume_data.json", mime="application/json")
-    
     st.divider()
     
-    # Upload JSON
     uploaded_json = st.file_uploader("⬆️ Load Resume Data (.json)", type="json")
     if uploaded_json is not None:
         if st.button("Load Data", type="primary"):
             loaded_data = json.load(uploaded_json)
-            # Merge loaded data, keeping photo intact
             preserved_photo = st.session_state.r_data.get('photo_bytes')
             st.session_state.r_data.update(loaded_data)
             st.session_state.r_data['photo_bytes'] = preserved_photo
+            
+            # Ensure custom sections from JSON are added to order list if missing
+            for cs in st.session_state.r_data.get('custom_sections',[]):
+                if f"custom_{cs['id']}" not in st.session_state.section_order:
+                    st.session_state.section_order.append(f"custom_{cs['id']}")
+                    
             st.success("Resume loaded successfully!")
             st.rerun()
 
@@ -374,13 +383,13 @@ st.divider()
 
 # --- STEP 2: EDITING ---
 st.markdown("### 📝 Step 2: Edit Inside Categories")
-tabs = st.tabs(["👤 Info", "🎓 Education", "💼 Experience", "🚀 Projects", "🤝 Leadership", "🛠️ Skills", "⭐ Custom"])
+tabs = st.tabs(["👤 Info & Summary", "🎓 Education", "💼 Experience", "🚀 Projects", "🤝 Leadership", "🛠️ Skills", "⭐ Custom"])
 
 def move_item(lst, idx, dir):
     if dir == 'up' and idx > 0: lst[idx], lst[idx-1] = lst[idx-1], lst[idx]
     if dir == 'down' and idx < len(lst)-1: lst[idx], lst[idx+1] = lst[idx+1], lst[idx]
 
-with tabs[0]: # Info
+with tabs[0]: # Info & Summary
     c_text, c_img = st.columns([2, 1])
     with c_text:
         st.session_state.r_data['name'] = st.text_input("Full Name", st.session_state.r_data['name'])
@@ -392,9 +401,13 @@ with tabs[0]: # Info
     with c_img:
         photo = st.file_uploader("Profile Photo (Creative Mode Only)", type=["jpg", "png", "jpeg"])
         if photo: st.session_state.r_data['photo_bytes'] = photo.getvalue()
+    
+    st.divider()
+    st.session_state.r_data['heading_summary'] = st.text_input("Summary Section Title", st.session_state.r_data.get('heading_summary', 'Professional Summary'))
+    st.session_state.r_data['summary'] = st.text_area("Professional Summary Text", st.session_state.r_data.get('summary', ''), height=100)
 
 with tabs[1]: # Edu
-    st.session_state.r_data['heading_education'] = st.text_input("Section Title", st.session_state.r_data.get('heading_education', 'Education'), key='h_edu')
+    st.session_state.r_data['heading_education'] = st.text_input("Education Section Title", st.session_state.r_data.get('heading_education', 'Education'), key='h_edu')
     for i, ed in enumerate(st.session_state.r_data['education']):
         with st.expander(f"{ed.get('school', 'New School')} - {ed.get('degree', '')}", expanded=True):
             cu, cd, cx, _ = st.columns([1,1,1,7])
@@ -410,7 +423,7 @@ with tabs[1]: # Edu
     if st.button("➕ Add School"): st.session_state.r_data['education'].append({}); st.rerun()
 
 with tabs[2]: # Experience
-    st.session_state.r_data['heading_experience'] = st.text_input("Section Title", st.session_state.r_data.get('heading_experience', 'Experience'), key='h_exp')
+    st.session_state.r_data['heading_experience'] = st.text_input("Experience Section Title", st.session_state.r_data.get('heading_experience', 'Experience'), key='h_exp')
     for i, exp in enumerate(st.session_state.r_data['experience']):
         with st.expander(f"{exp.get('company', 'New Job')} - {exp.get('title', '')}", expanded=True):
             cu, cd, cx, _ = st.columns([1,1,1,7])
@@ -430,7 +443,7 @@ with tabs[2]: # Experience
     if st.button("➕ Add Job"): st.session_state.r_data['experience'].append({}); st.rerun()
 
 with tabs[3]: # Projects
-    st.session_state.r_data['heading_projects'] = st.text_input("Section Title", st.session_state.r_data.get('heading_projects', 'Projects'), key='h_proj')
+    st.session_state.r_data['heading_projects'] = st.text_input("Projects Section Title", st.session_state.r_data.get('heading_projects', 'Projects'), key='h_proj')
     for i, p in enumerate(st.session_state.r_data['projects']):
         with st.expander(f"{p.get('title', 'New Project')}", expanded=True):
             cu, cd, cx, _ = st.columns([1,1,1,7])
@@ -449,7 +462,7 @@ with tabs[3]: # Projects
     if st.button("➕ Add Project"): st.session_state.r_data['projects'].append({}); st.rerun()
 
 with tabs[4]: # Leadership
-    st.session_state.r_data['heading_leadership'] = st.text_input("Section Title", st.session_state.r_data.get('heading_leadership', 'Leadership & Extracurriculars'), key='h_lead')
+    st.session_state.r_data['heading_leadership'] = st.text_input("Leadership Section Title", st.session_state.r_data.get('heading_leadership', 'Leadership & Extracurriculars'), key='h_lead')
     for i, l in enumerate(st.session_state.r_data['leadership']):
         with st.expander(f"{l.get('organization', 'New Org')}", expanded=True):
             cu, cd, cx, _ = st.columns([1,1,1,7])
@@ -469,21 +482,22 @@ with tabs[4]: # Leadership
     if st.button("➕ Add Leadership"): st.session_state.r_data['leadership'].append({}); st.rerun()
 
 with tabs[5]: # Skills
-    st.session_state.r_data['heading_skills'] = st.text_input("Section Title", st.session_state.r_data.get('heading_skills', 'Skills & Interests'))
+    st.session_state.r_data['heading_skills'] = st.text_input("Skills Section Title", st.session_state.r_data.get('heading_skills', 'Skills & Interests'))
     sk = st.session_state.r_data['skills']
     sk['technical'] = st.text_area("Technical Skills (Use commas)", sk.get('technical', ''))
     sk['languages'] = st.text_input("Languages", sk.get('languages', ''))
     sk['interests'] = st.text_input("Interests", sk.get('interests', ''))
 
 with tabs[6]: # Custom
+    st.info("You can add extra blocks like 'Certifications' or 'Publications' here.")
     for i, sec in enumerate(st.session_state.r_data.get('custom_sections',[])):
-        with st.expander(f"Custom: {sec.get('title', 'New Section')}", expanded=True):
+        with st.expander(f"Custom: {sec.get('title', 'Unnamed Section')}", expanded=True):
             cu, cd, cx, _ = st.columns([1,1,1,7])
             if cu.button("⬆️", key=f"cu_{i}"): move_item(st.session_state.r_data['custom_sections'], i, 'up'); st.rerun()
             if cd.button("⬇️", key=f"cdn_{i}"): move_item(st.session_state.r_data['custom_sections'], i, 'down'); st.rerun()
             if cx.button("🗑️", key=f"cx_{i}"):
-                idx = st.session_state.section_order.index(f"custom_{sec['id']}")
-                st.session_state.section_order.pop(idx)
+                if f"custom_{sec['id']}" in st.session_state.section_order:
+                    st.session_state.section_order.remove(f"custom_{sec['id']}")
                 st.session_state.r_data['custom_sections'].pop(i)
                 st.rerun()
             sec['title'] = st.text_input("Section Header", sec.get('title', ''), key=f"ct_{i}")
@@ -498,15 +512,22 @@ st.divider()
 
 # --- STEP 3: REORDER SECTIONS ---
 st.markdown("### 🗂️ Step 3: Global Category Order")
+st.info("Use the arrows to reorder how the sections appear on your final PDF.")
 for i, sec_key in enumerate(st.session_state.section_order):
     c1, c2, c3 = st.columns([1, 1, 12])
     if c1.button("⬆️", key=f"gu_{i}"): move_item(st.session_state.section_order, i, "up"); st.rerun()
     if c2.button("⬇️", key=f"gd_{i}"): move_item(st.session_state.section_order, i, "down"); st.rerun()
-    name = sec_key.split('_')[1]
-    if sec_key.startswith('core_'): name = st.session_state.r_data.get(f"heading_{name.lower()}", name)
+    
+    # Clearly label the blocks
+    if sec_key.startswith('core_'): 
+        name = st.session_state.r_data.get(f"heading_{sec_key.split('_')[1].lower()}", sec_key.split('_')[1])
     elif sec_key.startswith('custom_'):
         cs = next((c for c in st.session_state.r_data['custom_sections'] if c['id'] == sec_key.split('_')[1]), None)
-        if cs: name = cs.get('title', 'Custom')
+        if cs: 
+            name = f"Custom Section: {cs.get('title', '[Unnamed]')}"
+        else:
+            name = "Unknown Block"
+            
     c3.markdown(f"**{name}**")
 
 st.divider()
