@@ -36,6 +36,20 @@ def hex_to_rgb(hex_color):
     hex_color = hex_color.lstrip('#')
     return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
 
+# --- NEW UTILITY: WIDGET STATE CLEARER ---
+def reset_widget_states():
+    """Clears cached Streamlit widget inputs so they accurately reflect dictionary updates."""
+    prefixes = (
+        'ui_', 'es_', 'el_', 'edg_', 'edt_', 'eh_', 
+        'xc_', 'xl_', 'xt_', 'xdt_', 'xb_', 
+        'pt_', 'pdt_', 'pr_', 'pb_', 
+        'lo_', 'll_', 'lt_', 'ldt_', 'lb_', 
+        'ct_', 'cc_', 'h_', 'pdf_uploader', 'text_paster'
+    )
+    for key in list(st.session_state.keys()):
+        if key.startswith(prefixes):
+            del st.session_state[key]
+
 # --- AI AUTOFOCUS & POLISH LOGIC ---
 def auto_fill_with_ai(text, merge=False):
     if merge:
@@ -65,7 +79,7 @@ def auto_fill_with_ai(text, merge=False):
     
     Strict JSON Structure required:
     {{
-      "modifications_made": "Describe the exact updates you made here. (e.g., 'Added Python to technical skills', 'Added new Google job'). If none, write 'No changes'.",
+      "modifications_made": "Describe exact updates here. If none, write 'No changes'.",
       "name": "Full Name",
       "address": "City, State",
       "phone": "Phone",
@@ -77,7 +91,7 @@ def auto_fill_with_ai(text, merge=False):
       "projects":[{{"title": "", "date": "", "role": "", "bullets": ""}}],
       "leadership":[{{"organization": "", "location": "", "title": "", "date": "", "bullets": ""}}],
       "skills": {{"technical": "comma separated", "languages": "comma separated", "interests": "comma separated"}},
-      "custom_sections":[{{"title": "", "content": ""}}]
+      "custom_sections":[{{"id": "keep_existing_id_if_present", "title": "", "content": ""}}]
     }}
     """
     try:
@@ -90,7 +104,15 @@ def auto_fill_with_ai(text, merge=False):
             temperature=0, 
             response_format={"type": "json_object"}
         )
-        parsed_data = json.loads(completion.choices[0].message.content)
+        
+        # Safely clean markdown wrappers that break json.loads
+        content = completion.choices[0].message.content.strip()
+        if content.startswith("```"):
+            content = re.sub(r'^```[a-zA-Z]*\n', '', content)
+            content = re.sub(r'\n```$', '', content)
+            if content.endswith("```"): content = content[:-3].strip()
+            
+        parsed_data = json.loads(content)
         
         # Extract the AI's explanation of what it did
         ai_message = parsed_data.pop("modifications_made", "Parsed data successfully!")
@@ -104,7 +126,9 @@ def auto_fill_with_ai(text, merge=False):
         custom_ids =[]
         if 'custom_sections' in parsed_data:
             for cs in parsed_data['custom_sections']:
-                cid = cs.get('id', str(uuid.uuid4().hex))
+                cid = cs.get('id', '')
+                if not cid or cid == "keep_existing_id_if_present":
+                    cid = str(uuid.uuid4().hex)
                 cs['id'] = cid
                 custom_ids.append(f"custom_{cid}")
                 
@@ -119,6 +143,7 @@ def auto_fill_with_ai(text, merge=False):
                     idx = st.session_state.section_order.index('core_Skills') if 'core_Skills' in st.session_state.section_order else len(st.session_state.section_order)
                     st.session_state.section_order.insert(idx, cid_str)
                     
+        reset_widget_states() # Clear cached widgets so new AI data renders
         return True
     except Exception as e:
         st.error(f"Failed to parse AI response: {e}")
@@ -206,7 +231,7 @@ def generate_harvard_pdf(data, settings):
     pdf.set_text_color(0, 0, 0)
     
     pdf.set_font(font_fam, "", base_font)
-    contact_parts =[p for p in [data['address'], data['phone'], data['email'], clean_url(data.get('linkedin', ''))] if p.strip()]
+    contact_parts =[p for p in[data.get('address',''), data.get('phone',''), data.get('email',''), clean_url(data.get('linkedin', ''))] if p.strip()]
     pdf.cell(w=0, h=0.2, text=sanitize("  |  ".join(contact_parts)), align=header_align, new_x="LMARGIN", new_y="NEXT")
     pdf.ln(0.1)
     
@@ -370,6 +395,7 @@ with st.sidebar:
                 if f"custom_{cs['id']}" not in st.session_state.section_order:
                     st.session_state.section_order.append(f"custom_{cs['id']}")
                     
+            reset_widget_states()
             st.success("Resume loaded successfully!")
             st.rerun()
 
@@ -383,8 +409,8 @@ if st.session_state.ai_success_msg:
 # --- STEP 1: IMPORT ---
 st.markdown("### 📄 Step 1: Import Your Data")
 col_pdf, col_text = st.columns(2)
-with col_pdf: uploaded_file = st.file_uploader("1️⃣ Upload Old Resume (PDF)", type="pdf")
-with col_text: pasted_text = st.text_area("2️⃣ Or Paste Text (Instructions, updates, or full text)", height=100)
+with col_pdf: uploaded_file = st.file_uploader("1️⃣ Upload Old Resume (PDF)", type="pdf", key="pdf_uploader")
+with col_text: pasted_text = st.text_area("2️⃣ Or Paste Text (Instructions, updates, or full text)", height=100, key="text_paster")
 
 def process_input(merge):
     combined = ""
@@ -422,23 +448,24 @@ tabs = st.tabs(["👤 Info & Summary", "🎓 Education", "💼 Experience", "�
 def move_item(lst, idx, dir):
     if dir == 'up' and idx > 0: lst[idx], lst[idx-1] = lst[idx-1], lst[idx]
     if dir == 'down' and idx < len(lst)-1: lst[idx], lst[idx+1] = lst[idx+1], lst[idx]
+    reset_widget_states()
 
 with tabs[0]: 
     c_text, c_img = st.columns([2, 1])
     with c_text:
-        st.session_state.r_data['name'] = st.text_input("Full Name", st.session_state.r_data['name'])
+        st.session_state.r_data['name'] = st.text_input("Full Name", st.session_state.r_data['name'], key="ui_name")
         c1, c2 = st.columns(2)
-        st.session_state.r_data['address'] = c1.text_input("City, State", st.session_state.r_data['address'])
-        st.session_state.r_data['phone'] = c2.text_input("Phone", st.session_state.r_data['phone'])
-        st.session_state.r_data['email'] = c1.text_input("Email", st.session_state.r_data['email'])
-        st.session_state.r_data['linkedin'] = c2.text_input("LinkedIn URL", st.session_state.r_data['linkedin'])
+        st.session_state.r_data['address'] = c1.text_input("City, State", st.session_state.r_data['address'], key="ui_address")
+        st.session_state.r_data['phone'] = c2.text_input("Phone", st.session_state.r_data['phone'], key="ui_phone")
+        st.session_state.r_data['email'] = c1.text_input("Email", st.session_state.r_data['email'], key="ui_email")
+        st.session_state.r_data['linkedin'] = c2.text_input("LinkedIn URL", st.session_state.r_data['linkedin'], key="ui_linkedin")
     with c_img:
         photo = st.file_uploader("Profile Photo (Creative Mode Only)", type=["jpg", "png", "jpeg"])
         if photo: st.session_state.r_data['photo_bytes'] = photo.getvalue()
     
     st.divider()
-    st.session_state.r_data['heading_summary'] = st.text_input("Summary Section Title", st.session_state.r_data.get('heading_summary', 'Professional Summary'))
-    st.session_state.r_data['summary'] = st.text_area("Professional Summary Text", st.session_state.r_data.get('summary', ''), height=100)
+    st.session_state.r_data['heading_summary'] = st.text_input("Summary Section Title", st.session_state.r_data.get('heading_summary', 'Professional Summary'), key="h_summary")
+    st.session_state.r_data['summary'] = st.text_area("Professional Summary Text", st.session_state.r_data.get('summary', ''), height=100, key="ui_summary")
 
 with tabs[1]: 
     st.session_state.r_data['heading_education'] = st.text_input("Education Section Title", st.session_state.r_data.get('heading_education', 'Education'), key='h_edu')
@@ -447,14 +474,14 @@ with tabs[1]:
             cu, cd, cx, _ = st.columns([1,1,1,7])
             if cu.button("⬆️", key=f"eu_{i}"): move_item(st.session_state.r_data['education'], i, 'up'); st.rerun()
             if cd.button("⬇️", key=f"ed_{i}"): move_item(st.session_state.r_data['education'], i, 'down'); st.rerun()
-            if cx.button("🗑️", key=f"ex_{i}"): st.session_state.r_data['education'].pop(i); st.rerun()
+            if cx.button("🗑️", key=f"ex_{i}"): st.session_state.r_data['education'].pop(i); reset_widget_states(); st.rerun()
             c1, c2 = st.columns(2)
             ed['school'] = c1.text_input("School", ed.get('school', ''), key=f"es_{i}")
             ed['location'] = c2.text_input("Location", ed.get('location', ''), key=f"el_{i}")
             ed['degree'] = c1.text_input("Degree", ed.get('degree', ''), key=f"edg_{i}")
             ed['date'] = c2.text_input("Date", ed.get('date', ''), key=f"edt_{i}")
             ed['details'] = st.text_input("GPA / Honors", ed.get('details', ''), key=f"eh_{i}")
-    if st.button("➕ Add School"): st.session_state.r_data['education'].append({}); st.rerun()
+    if st.button("➕ Add School"): st.session_state.r_data['education'].append({}); reset_widget_states(); st.rerun()
 
 with tabs[2]: 
     st.session_state.r_data['heading_experience'] = st.text_input("Experience Section Title", st.session_state.r_data.get('heading_experience', 'Experience'), key='h_exp')
@@ -463,7 +490,7 @@ with tabs[2]:
             cu, cd, cx, _ = st.columns([1,1,1,7])
             if cu.button("⬆️", key=f"xu_{i}"): move_item(st.session_state.r_data['experience'], i, 'up'); st.rerun()
             if cd.button("⬇️", key=f"xdn_{i}"): move_item(st.session_state.r_data['experience'], i, 'down'); st.rerun()
-            if cx.button("🗑️", key=f"xx_{i}"): st.session_state.r_data['experience'].pop(i); st.rerun()
+            if cx.button("🗑️", key=f"xx_{i}"): st.session_state.r_data['experience'].pop(i); reset_widget_states(); st.rerun()
             c1, c2 = st.columns(2)
             exp['company'] = c1.text_input("Company", exp.get('company', ''), key=f"xc_{i}")
             exp['location'] = c2.text_input("Location", exp.get('location', ''), key=f"xl_{i}")
@@ -473,8 +500,9 @@ with tabs[2]:
             if st.button("✨ Polish Bullets (AI)", key=f"xai_{i}"):
                 with st.spinner("Rewriting using STAR method..."):
                     exp['bullets'] = polish_bullet_with_ai(exp['bullets'])
+                    reset_widget_states()
                     st.rerun()
-    if st.button("➕ Add Job"): st.session_state.r_data['experience'].append({}); st.rerun()
+    if st.button("➕ Add Job"): st.session_state.r_data['experience'].append({}); reset_widget_states(); st.rerun()
 
 with tabs[3]: 
     st.session_state.r_data['heading_projects'] = st.text_input("Projects Section Title", st.session_state.r_data.get('heading_projects', 'Projects'), key='h_proj')
@@ -483,7 +511,7 @@ with tabs[3]:
             cu, cd, cx, _ = st.columns([1,1,1,7])
             if cu.button("⬆️", key=f"pu_{i}"): move_item(st.session_state.r_data['projects'], i, 'up'); st.rerun()
             if cd.button("⬇️", key=f"pdn_{i}"): move_item(st.session_state.r_data['projects'], i, 'down'); st.rerun()
-            if cx.button("🗑️", key=f"px_{i}"): st.session_state.r_data['projects'].pop(i); st.rerun()
+            if cx.button("🗑️", key=f"px_{i}"): st.session_state.r_data['projects'].pop(i); reset_widget_states(); st.rerun()
             c1, c2 = st.columns(2)
             p['title'] = c1.text_input("Project Name", p.get('title', ''), key=f"pt_{i}")
             p['date'] = c2.text_input("Date", p.get('date', ''), key=f"pdt_{i}")
@@ -492,8 +520,9 @@ with tabs[3]:
             if st.button("✨ Polish Bullets (AI)", key=f"pai_{i}"):
                 with st.spinner("Rewriting..."):
                     p['bullets'] = polish_bullet_with_ai(p['bullets'])
+                    reset_widget_states()
                     st.rerun()
-    if st.button("➕ Add Project"): st.session_state.r_data['projects'].append({}); st.rerun()
+    if st.button("➕ Add Project"): st.session_state.r_data['projects'].append({}); reset_widget_states(); st.rerun()
 
 with tabs[4]: 
     st.session_state.r_data['heading_leadership'] = st.text_input("Leadership Section Title", st.session_state.r_data.get('heading_leadership', 'Leadership & Extracurriculars'), key='h_lead')
@@ -502,7 +531,7 @@ with tabs[4]:
             cu, cd, cx, _ = st.columns([1,1,1,7])
             if cu.button("⬆️", key=f"lu_{i}"): move_item(st.session_state.r_data['leadership'], i, 'up'); st.rerun()
             if cd.button("⬇️", key=f"ldn_{i}"): move_item(st.session_state.r_data['leadership'], i, 'down'); st.rerun()
-            if cx.button("🗑️", key=f"lx_{i}"): st.session_state.r_data['leadership'].pop(i); st.rerun()
+            if cx.button("🗑️", key=f"lx_{i}"): st.session_state.r_data['leadership'].pop(i); reset_widget_states(); st.rerun()
             c1, c2 = st.columns(2)
             l['organization'] = c1.text_input("Organization", l.get('organization', ''), key=f"lo_{i}")
             l['location'] = c2.text_input("Location", l.get('location', ''), key=f"ll_{i}")
@@ -512,15 +541,16 @@ with tabs[4]:
             if st.button("✨ Polish Bullets (AI)", key=f"lai_{i}"):
                 with st.spinner("Rewriting..."):
                     l['bullets'] = polish_bullet_with_ai(l['bullets'])
+                    reset_widget_states()
                     st.rerun()
-    if st.button("➕ Add Leadership"): st.session_state.r_data['leadership'].append({}); st.rerun()
+    if st.button("➕ Add Leadership"): st.session_state.r_data['leadership'].append({}); reset_widget_states(); st.rerun()
 
 with tabs[5]: 
-    st.session_state.r_data['heading_skills'] = st.text_input("Skills Section Title", st.session_state.r_data.get('heading_skills', 'Skills & Interests'))
+    st.session_state.r_data['heading_skills'] = st.text_input("Skills Section Title", st.session_state.r_data.get('heading_skills', 'Skills & Interests'), key="h_skills")
     sk = st.session_state.r_data['skills']
-    sk['technical'] = st.text_area("Technical Skills (Use commas)", sk.get('technical', ''))
-    sk['languages'] = st.text_input("Languages", sk.get('languages', ''))
-    sk['interests'] = st.text_input("Interests", sk.get('interests', ''))
+    sk['technical'] = st.text_area("Technical Skills (Use commas)", sk.get('technical', ''), key="ui_tech")
+    sk['languages'] = st.text_input("Languages", sk.get('languages', ''), key="ui_lang")
+    sk['interests'] = st.text_input("Interests", sk.get('interests', ''), key="ui_int")
 
 with tabs[6]: 
     st.info("You can add extra blocks like 'Certifications' or 'Publications' here.")
@@ -533,6 +563,7 @@ with tabs[6]:
                 if f"custom_{sec['id']}" in st.session_state.section_order:
                     st.session_state.section_order.remove(f"custom_{sec['id']}")
                 st.session_state.r_data['custom_sections'].pop(i)
+                reset_widget_states()
                 st.rerun()
             sec['title'] = st.text_input("Section Header", sec.get('title', ''), key=f"ct_{i}")
             sec['content'] = st.text_area("Content", sec.get('content', ''), key=f"cc_{i}")
@@ -540,6 +571,7 @@ with tabs[6]:
         nid = str(uuid.uuid4().hex)
         st.session_state.r_data['custom_sections'].append({'id': nid, 'title': '', 'content': ''})
         st.session_state.section_order.append(f'custom_{nid}')
+        reset_widget_states()
         st.rerun()
 
 st.divider()
