@@ -32,6 +32,10 @@ def clean_url(url):
     if not url: return ""
     return re.sub(r"^(https?://)?(www\.)?", "", url).rstrip("/")
 
+def hex_to_rgb(hex_color):
+    hex_color = hex_color.lstrip('#')
+    return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+
 def strip_internal_ids(data):
     if isinstance(data, dict):
         return {k: strip_internal_ids(v) for k, v in data.items() if k not in ['_id', 'photo_bytes']}
@@ -47,7 +51,7 @@ def auto_fill_with_ai(text, merge=False):
         "skills": {"technical": "", "languages": "", "interests": ""},
         "custom_sections":[]
     }
-    prompt = f"Convert this into a resume JSON. Keep all details. Output ONLY JSON.\n\n{text}"
+    prompt = f"Convert this into a resume JSON. Keep all details. Do not shorten. Output ONLY JSON.\n\n{text}"
     try:
         completion = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -62,7 +66,7 @@ def auto_fill_with_ai(text, merge=False):
         return True
     except Exception: return False
 
-# --- PDF GENERATOR WITH BLOCK PROTECTION ---
+# --- PDF GENERATOR WITH "STAY TOGETHER" LOGIC ---
 def generate_harvard_pdf(data, settings):
     pdf = FPDF(unit="in", format=settings['paper_size'].lower())
     pdf.set_auto_page_break(auto=True, margin=settings['margin'])
@@ -89,30 +93,28 @@ def generate_harvard_pdf(data, settings):
         pdf.cell(w=0, h=0.22, text=title.upper(), border="B", ln=True)
         pdf.ln(0.05)
 
-    def print_job_block(name, loc, title, date, bullets):
-        # 1. MEASURE HEIGHT BEFORE PRINTING
-        # Headers (0.18 + 0.18) + Bullets (calculated via multi_cell height)
-        test_pdf = FPDF(unit="in", format=settings['paper_size'].lower())
-        test_pdf.add_page()
-        test_pdf.set_margins(left=margin, top=margin, right=margin)
-        test_pdf.set_font(font_fam, "", base_font)
+    def print_job_block(name, loc, title, date, bullets_text):
+        # --- CALCULATION PHASE (Dry Run) ---
+        # Height of Header 1 (Company/Loc) + Header 2 (Title/Date)
+        total_height = 0.18 + 0.18 
         
-        start_y = test_pdf.get_y()
-        test_pdf.ln(0.18) # Header 1
-        test_pdf.ln(0.18) # Header 2
-        if bullets:
-            for b in bullets.split('\n'):
-                if b.strip():
-                    # Calculate multi_cell height for this bullet
-                    test_pdf.multi_cell(w=pdf.epw - 0.2, h=0.18 * spacing, text=sanitize(b))
+        # Calculate bullet height with word wrapping
+        bullet_list = [b.strip() for b in bullets_text.split('\n') if b.strip()]
+        for b in bullet_list:
+            bullet_clean = sanitize(b.lstrip('-•*').strip())
+            # dry_run=True returns the height the multi_cell WOULD take
+            h = pdf.multi_cell(w=pdf.epw - 0.2, h=0.18 * spacing, text=bullet_clean, dry_run=True, markdown=True)
+            total_height += h
         
-        total_block_height = test_pdf.get_y() - start_y + 0.1 # Add small padding
+        total_height += 0.15 # Extra padding/buffer
         
-        # 2. CHECK IF BLOCK FITS
-        if (pdf.h - pdf.b_margin - pdf.get_y()) < total_block_height:
+        # --- PROTECTION PHASE ---
+        # If block height > available space, break page before starting
+        space_left = pdf.h - pdf.b_margin - pdf.get_y()
+        if total_height > space_left:
             pdf.add_page()
 
-        # 3. ACTUAL PRINTING
+        # --- PRINTING PHASE ---
         pdf.set_font(font_fam, "B", base_font)
         pdf.cell(w=pdf.epw/2, h=0.18, text=sanitize(name), align="L")
         pdf.cell(w=pdf.epw/2, h=0.18, text=sanitize(loc), align="R", ln=True)
@@ -121,14 +123,12 @@ def generate_harvard_pdf(data, settings):
         pdf.cell(w=pdf.epw/2, h=0.18, text=sanitize(title), align="L")
         pdf.cell(w=pdf.epw/2, h=0.18, text=sanitize(date), align="R", ln=True)
         
-        if bullets:
-            for b in bullets.split('\n'):
-                bullet_text = sanitize(b.strip().lstrip('-•*').strip())
-                if not bullet_text: continue
-                pdf.set_font(font_fam, "", base_font)
-                pdf.set_x(margin + 0.15)
-                pdf.cell(w=0.15, h=0.18 * spacing, text=chr(149)) 
-                pdf.multi_cell(w=0, h=0.18 * spacing, text=bullet_text, markdown=True)
+        for b in bullet_list:
+            bullet_clean = sanitize(b.lstrip('-•*').strip())
+            pdf.set_font(font_fam, "", base_font)
+            pdf.set_x(margin + 0.1)
+            pdf.cell(w=0.15, h=0.18 * spacing, text=chr(149)) 
+            pdf.multi_cell(w=0, h=0.18 * spacing, text=bullet_clean, markdown=True)
 
     # Render Loop
     for sec_key in settings['section_order']:
@@ -154,6 +154,7 @@ def generate_harvard_pdf(data, settings):
         elif sec_key == 'core_Skills':
             add_section_header("Additional Information")
             sk = data.get('skills', {})
+            # Combined Advice A logic
             parts = []
             if sk.get('technical'): parts.append(f"**Technical Skills:** {sk['technical']}")
             if sk.get('languages'): parts.append(f"**Languages:** {sk['languages']}")
@@ -171,20 +172,13 @@ def generate_harvard_pdf(data, settings):
 
     return pdf.output(), pdf.page_no()
 
-# --- STREAMLIT UI (Full Original Version) ---
+# --- STREAMLIT UI ---
 st.set_page_config(page_title="Harvard Resume Builder", layout="wide")
 if 'ui_gen_id' not in st.session_state: st.session_state.ui_gen_id = str(uuid.uuid4())
 if 'r_data' not in st.session_state:
-    st.session_state.r_data = {
-        'name': '', 'address': '', 'phone': '', 'email': '', 'linkedin': '', 'summary': '',
-        'education':[], 'experience':[], 'projects':[], 'leadership':[],
-        'skills': {'technical': '', 'languages': '', 'interests': ''},
-        'custom_sections':[]
-    }
-if 'section_order' not in st.session_state:
-    st.session_state.section_order = ['core_Summary', 'core_Experience', 'core_Education', 'core_Skills']
+    st.session_state.r_data = {'name': '', 'address': '', 'phone': '', 'email': '', 'linkedin': '', 'summary': '', 'experience':[], 'education':[], 'skills':{}, 'custom_sections':[]}
 
-# Sidebar Save/Load
+# Sidebar
 with st.sidebar:
     st.header("💾 Project")
     st.download_button("Export JSON", data=json.dumps(strip_internal_ids(st.session_state.r_data)), file_name="resume.json")
@@ -193,13 +187,14 @@ with st.sidebar:
         st.session_state.r_data.update(json.load(up))
         st.rerun()
 
-st.title("🎓 Harvard Resume Builder")
+st.title("🎓 Elite Harvard Resume Builder")
+st.markdown("### No-Breakage 2-Page Support")
 
 # Step 1: Import
 col_pdf, col_text = st.columns(2)
 with col_pdf: uploaded_file = st.file_uploader("Upload PDF", type="pdf")
 with col_text: pasted_text = st.text_area("Paste Content")
-if st.button("✨ Auto-Fill Data"):
+if st.button("✨ Auto-Fill Data", type="primary"):
     content = pasted_text
     if uploaded_file:
         for page in PyPDF2.PdfReader(uploaded_file).pages: content += page.extract_text()
@@ -208,54 +203,31 @@ if st.button("✨ Auto-Fill Data"):
         st.rerun()
 
 # Step 2: Editor Tabs
-tabs = st.tabs(["👤 Info", "🎓 Education", "💼 Experience", "🛠️ Skills", "⭐ Custom"])
+tabs = st.tabs(["👤 Info", "🎓 Edu", "💼 Experience", "🛠️ Skills", "⭐ Custom"])
 uid = st.session_state.ui_gen_id
-
-with tabs[0]:
-    d = st.session_state.r_data
-    d['name'] = st.text_input("Name", d.get('name'), key=f"n_{uid}")
-    c1, c2 = st.columns(2)
-    d['address'] = c1.text_input("Address", d.get('address'), key=f"a_{uid}")
-    d['phone'] = c2.text_input("Phone", d.get('phone'), key=f"p_{uid}")
-    d['email'] = c1.text_input("Email", d.get('email'), key=f"e_{uid}")
-    d['linkedin'] = c2.text_input("LinkedIn", d.get('linkedin'), key=f"l_{uid}")
-    d['summary'] = st.text_area("Summary", d.get('summary'), key=f"s_{uid}")
-
-with tabs[1]:
-    for i, ed in enumerate(st.session_state.r_data.get('education', [])):
-        with st.expander(f"School: {ed.get('school')}"):
-            ed['school'] = st.text_input("School", ed.get('school'), key=f"eds_{i}_{uid}")
-            ed['degree'] = st.text_input("Degree", ed.get('degree'), key=f"edd_{i}_{uid}")
-            ed['details'] = st.text_area("Details", ed.get('details'), key=f"edt_{i}_{uid}")
-    if st.button("Add Edu"): st.session_state.r_data['education'].append({}); st.rerun()
 
 with tabs[2]:
     for i, ex in enumerate(st.session_state.r_data.get('experience', [])):
-        with st.expander(f"Job: {ex.get('company')}"):
+        with st.expander(f"Job: {ex.get('company', 'New')}", expanded=True):
             ex['company'] = st.text_input("Company", ex.get('company'), key=f"exc_{i}_{uid}")
             ex['title'] = st.text_input("Title", ex.get('title'), key=f"ext_{i}_{uid}")
             ex['date'] = st.text_input("Date", ex.get('date'), key=f"exd_{i}_{uid}")
-            ex['bullets'] = st.text_area("Bullets", ex.get('bullets'), height=150, key=f"exb_{i}_{uid}")
+            ex['location'] = st.text_input("Location", ex.get('location'), key=f"exl_{i}_{uid}")
+            ex['bullets'] = st.text_area("Bullets", ex.get('bullets'), height=200, key=f"exb_{i}_{uid}")
     if st.button("Add Job"): st.session_state.r_data['experience'].append({}); st.rerun()
-
-with tabs[3]:
-    sk = st.session_state.r_data['skills']
-    sk['technical'] = st.text_area("Technical", sk.get('technical'), key=f"sk_t_{uid}")
-    sk['languages'] = st.text_input("Languages", sk.get('languages'), key=f"sk_l_{uid}")
-    sk['interests'] = st.text_input("Interests", sk.get('interests'), key=f"sk_i_{uid}")
 
 # Step 3: Export
 st.divider()
 settings = {
     'paper_size': 'Letter', 'font_family': 'Times', 'header_align': 'Center',
     'margin': 0.75, 'font_size': 11, 'header_size': 16, 'spacing': 1.0,
-    'section_order': st.session_state.section_order
+    'section_order': ['core_Summary', 'core_Experience', 'core_Education', 'core_Skills']
 }
 
-if st.button("🔄 Generate PDF Preview", type="primary"):
+if st.button("🔄 Generate Preview", type="primary"):
     pdf_bytes, pages = generate_harvard_pdf(st.session_state.r_data, settings)
     st.session_state.pdf_final = pdf_bytes
-    st.success(f"Resume generated! Total pages: {pages}. No entries are split across pages.")
+    st.success(f"Resume generated! Total pages: {pages}. Blocks are protected from splitting.")
 
 if 'pdf_final' in st.session_state:
     st.download_button("⬇️ Download PDF", data=st.session_state.pdf_final, file_name="Rod_Salmeo_Resume.pdf")
