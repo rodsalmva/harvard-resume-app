@@ -37,14 +37,13 @@ def hex_to_rgb(hex_color):
     return tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
 
 def strip_internal_ids(data):
-    """Removes internal UI tracking IDs before sending to AI or saving to disk."""
     if isinstance(data, dict):
         return {k: strip_internal_ids(v) for k, v in data.items() if k not in ['_id', 'photo_bytes']}
     elif isinstance(data, list):
-        return[strip_internal_ids(v) for v in data]
+        return [strip_internal_ids(v) for v in data]
     return data
 
-# --- AI AUTOFOCUS & POLISH LOGIC ---
+# --- AI LOGIC ---
 def auto_fill_with_ai(text, merge=False):
     if merge:
         baseline_data = strip_internal_ids(st.session_state.r_data)
@@ -58,119 +57,54 @@ def auto_fill_with_ai(text, merge=False):
         
     prompt = f"""
     You are an advanced AI resume compiler and editor.
+    BASELINE JSON: {json.dumps(baseline_data)}
+    NEW RAW INPUT: {text}
     
-    BASELINE JSON (Current Resume State):
-    {json.dumps(baseline_data)}
-    
-    NEW RAW INPUT (New data or instructions to apply):
-    {text}
-    
-    CRITICAL INSTRUCTIONS:
-    1. Compare the NEW RAW INPUT against the BASELINE JSON.
-    2. If the NEW RAW INPUT contains new experiences, skills, projects, or specific instructions (e.g., "Add Python to skills" or "Update my summary"), YOU MUST APPLY THESE UPDATES to the JSON.
-    3. Do NOT delete existing data unless explicitly told to. Append and enhance.
-    4. First, fill out the "modifications_made" field explaining exactly what you added or changed. Then, output the rest of the updated JSON.
-    
-    Strict JSON Structure required:
-    {{
-      "modifications_made": "Describe exact updates here. If none, write 'No changes'.",
-      "name": "Full Name",
-      "address": "City, State",
-      "phone": "Phone",
-      "email": "Email",
-      "linkedin": "URL",
-      "summary": "Brief professional summary or objective",
-      "education":[{{"school": "", "location": "", "degree": "", "date": "", "details": ""}}],
-      "experience":[{{"company": "", "location": "", "title": "", "date": "", "bullets": "bullet 1\\nbullet 2"}}],
-      "projects":[{{"title": "", "date": "", "role": "", "bullets": ""}}],
-      "leadership":[{{"organization": "", "location": "", "title": "", "date": "", "bullets": ""}}],
-      "skills": {{"technical": "comma separated", "languages": "comma separated", "interests": "comma separated"}},
-      "custom_sections":[{{"id": "keep_existing_id_if_present", "title": "", "content": ""}}]
-    }}
+    CRITICAL: Output a valid JSON object. Incorporate new data into the structure. 
+    Format bullets using the STAR method. 
+    Keep technical skills, languages, and interests separate in the "skills" object.
     """
     try:
         completion = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": "You are a precise JSON API. You MUST incorporate user instructions."}, 
-                {"role": "user", "content": prompt}
-            ],
+            messages=[{"role": "system", "content": "You are a precise JSON API."}, {"role": "user", "content": prompt}],
             temperature=0, 
             response_format={"type": "json_object"}
         )
-        
-        # Safely clean markdown wrappers
         content = completion.choices[0].message.content.strip()
-        if content.startswith("```"):
-            content = re.sub(r'^```[a-zA-Z]*\n', '', content)
-            content = re.sub(r'\n```$', '', content)
-            if content.endswith("```"): content = content[:-3].strip()
-            
         parsed_data = json.loads(content)
-        ai_message = parsed_data.pop("modifications_made", "Parsed data successfully!")
-        st.session_state.ai_success_msg = ai_message
         
-        # Preserve existing UI settings & photo
+        # Preserve photo/UI
         preserved_photo = st.session_state.r_data.get('photo_bytes')
-        for key in['heading_summary', 'heading_education', 'heading_experience', 'heading_projects', 'heading_leadership', 'heading_skills']:
-            parsed_data[key] = st.session_state.r_data.get(key, key.split('_')[1].capitalize())
+        for key in ['heading_summary', 'heading_education', 'heading_experience', 'heading_projects', 'heading_leadership', 'heading_skills']:
+            parsed_data[key] = st.session_state.r_data.get(key, key.split('_')[1].capitalize() if '_' in key else "Skills")
             
-        custom_ids = []
-        if 'custom_sections' in parsed_data:
-            for cs in parsed_data['custom_sections']:
-                cid = cs.get('id', '')
-                if not cid or cid == "keep_existing_id_if_present":
-                    cid = str(uuid.uuid4().hex)
-                cs['id'] = cid
-                custom_ids.append(f"custom_{cid}")
-                
         st.session_state.r_data = parsed_data
         st.session_state.r_data['photo_bytes'] = preserved_photo
-        
-        if not merge:
-            st.session_state.section_order =['core_Summary', 'core_Education', 'core_Experience', 'core_Projects', 'core_Leadership'] + custom_ids + ['core_Skills']
-        else:
-            for cid_str in custom_ids:
-                if cid_str not in st.session_state.section_order:
-                    idx = st.session_state.section_order.index('core_Skills') if 'core_Skills' in st.session_state.section_order else len(st.session_state.section_order)
-                    st.session_state.section_order.insert(idx, cid_str)
-                    
-        # Force global UI refresh so new data renders cleanly!
         st.session_state.ui_gen_id = str(uuid.uuid4())
         return True
     except Exception as e:
-        st.error(f"Failed to parse AI response: {e}")
+        st.error(f"AI Error: {e}")
         return False
 
 def polish_bullet_with_ai(text):
-    prompt = f"""Rewrite the following resume bullet points to be punchier, metric-driven, and follow the STAR method (Situation, Task, Action, Result). 
-    Start each bullet with a strong action verb. Keep it to a concise bulleted list. 
-    Format: Use asterisks for bolding key metrics/tools (e.g., "Increased revenue by **20%** using **Python**").
-    
-    Original Text:
-    {text}
-    """
+    prompt = f"Rewrite these resume bullets to be metric-driven (STAR method). Use **text** for bolding metrics. \n\n{text}"
     try:
         completion = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
             temperature=0.5
         )
-        content = completion.choices[0].message.content.strip()
-        return re.sub(r'```[a-zA-Z]*\n|```', '', content).strip()
-    except Exception as e:
-        st.error(f"AI Polish Failed: {e}")
-        return text
+        return completion.choices[0].message.content.strip()
+    except Exception: return text
 
-# --- PDF GENERATOR (fpdf2) ---
+# --- PDF GENERATOR ---
 def generate_harvard_pdf(data, settings):
     paper_w = 8.5 if settings['paper_size'] == "Letter" else 8.27
     paper_h = 11.0 if settings['paper_size'] == "Letter" else 11.69
     
     pdf = FPDF(unit="in", format=settings['paper_size'].lower())
     author_name = sanitize(data.get('name', 'Candidate'))
-    pdf.set_title(f"{author_name} - Resume")
-    pdf.set_author(author_name)
     pdf.set_auto_page_break(auto=True, margin=settings['margin'])
     pdf.add_page()
     
@@ -180,530 +114,227 @@ def generate_harvard_pdf(data, settings):
     font_fam = settings['font_family']
     header_align = settings['header_align'][0] 
     accent_rgb = settings['accent_rgb']
-    
     pdf.set_margins(left=margin, top=margin, right=margin)
 
-    # ALIGNMENT GRID
-    if settings.get('show_grid'):
-        pdf.set_draw_color(200, 220, 255)
-        pdf.set_font("Helvetica", "", 6)
-        for i in range(1, 85): 
-            x = i / 10.0
-            pdf.line(x, 0, x, 11)
-        for i in range(1, 110):
-            y = i / 10.0
-            pdf.line(0, y, 8.5, y)
-        pdf.set_draw_color(0, 0, 0)
-
-    # PHOTO HANDLING
-    photo_h = 0
+    # Photo Handling
     if not settings['strict_mode'] and data.get('photo_bytes') and settings['photo_position'] != "Hide Photo":
         try:
             img = Image.open(io.BytesIO(data['photo_bytes']))
             p_w = settings['photo_size']
-            photo_h = p_w * (img.height / img.width)
-            
             with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
                 img.convert('RGB').save(tmp.name, format="JPEG")
-                tmp_path = tmp.name
-                
-            base_p_x = margin if settings['photo_position'] == "Top Left" else paper_w - margin - p_w
-            if settings['photo_position'] == "Top Left": pdf.set_left_margin(margin + p_w + 0.2)
-            else: pdf.set_right_margin(margin + p_w + 0.2)
-                
-            pdf.image(tmp_path, x=base_p_x + settings['photo_x_offset'], y=margin + settings['photo_y_offset'], w=p_w)
-            os.remove(tmp_path)
-            pdf.set_x(pdf.l_margin)
-        except Exception as e:
-            pass
+                pdf.image(tmp.name, x=(margin if settings['photo_position'] == "Top Left" else paper_w - margin - p_w), y=margin, w=p_w)
+            os.remove(tmp.name)
+        except: pass
 
     # Header
     pdf.set_text_color(*accent_rgb)
     pdf.set_font(font_fam, "B", settings['header_size'])
-    pdf.cell(w=0, h=0.3, text=author_name, align=header_align, new_x="LMARGIN", new_y="NEXT")
+    pdf.cell(w=0, h=0.3, text=author_name, align=header_align, ln=True)
     pdf.set_text_color(0, 0, 0)
-    
     pdf.set_font(font_fam, "", base_font)
-    contact_parts = [p for p in[data.get('address',''), data.get('phone',''), data.get('email',''), clean_url(data.get('linkedin', ''))] if p.strip()]
-    pdf.cell(w=0, h=0.2, text=sanitize("  |  ".join(contact_parts)), align=header_align, new_x="LMARGIN", new_y="NEXT")
+    contact = [p for p in [data.get('address',''), data.get('phone',''), data.get('email',''), clean_url(data.get('linkedin', ''))] if p.strip()]
+    pdf.cell(w=0, h=0.2, text=sanitize(" | ".join(contact)), align=header_align, ln=True)
     pdf.ln(0.1)
-    
-    pdf.set_left_margin(margin)
-    pdf.set_right_margin(margin)
-    if photo_h > 0 and pdf.get_y() < (margin + settings['photo_y_offset'] + photo_h):
-        pdf.set_y(margin + settings['photo_y_offset'] + photo_h + 0.1)
 
-    def check_page_break(required_height):
-        if pdf.get_y() > (paper_h - margin - required_height):
-            pdf.add_page()
-            
     def add_section_header(title):
-        check_page_break(0.5)
         pdf.set_text_color(*accent_rgb)
         pdf.set_draw_color(*accent_rgb)
         pdf.set_font(font_fam, "B", base_font)
-        pdf.cell(w=0, h=0.25, text=title.upper(), border="B", new_x="LMARGIN", new_y="NEXT")
+        pdf.cell(w=0, h=0.25, text=title.upper(), border="B", ln=True)
         pdf.set_text_color(0, 0, 0)
-        pdf.set_draw_color(0, 0, 0)
         pdf.ln(0.05)
         
-    def add_left_right(left_text, right_text, left_style, right_style):
-        y_before = pdf.get_y()
-        pdf.set_font(font_fam, left_style, base_font)
-        pdf.cell(w=0, h=0.2, text=sanitize(left_text), align="L")
-        if right_text:
-            pdf.set_y(y_before)
-            pdf.set_font(font_fam, right_style, base_font)
-            pdf.cell(w=0, h=0.2, text=sanitize(right_text), align="R", new_x="LMARGIN", new_y="NEXT")
-        else:
-            pdf.ln(0.2)
+    def add_left_right(left, right, l_style="B", r_style=""):
+        pdf.set_font(font_fam, l_style, base_font)
+        pdf.cell(w=pdf.epw/2, h=0.2, text=sanitize(left), align="L")
+        pdf.set_font(font_fam, r_style, base_font)
+        pdf.cell(w=pdf.epw/2, h=0.2, text=sanitize(right), align="R", ln=True)
 
     def print_bullets(bullets_text):
-        if not bullets_text.strip(): return
-        bullets = [b.strip() for b in bullets_text.split('\n') if b.strip()]
-        for bullet in bullets:
-            bullet = sanitize(bullet.lstrip('-').lstrip('•').lstrip('*').strip())
+        for b in bullets_text.split('\n'):
+            bullet = sanitize(b.strip().lstrip('-•*').strip())
             if not bullet: continue
             pdf.set_font(font_fam, "", base_font)
-            pdf.cell(w=0.2, h=0.2 * spacing, text=chr(149), align="R") 
-            orig_lmargin = pdf.l_margin
-            pdf.set_left_margin(orig_lmargin + 0.25)
-            pdf.set_x(orig_lmargin + 0.25)
-            pdf.multi_cell(w=0, h=0.2 * spacing, text=bullet, markdown=True, new_x="LMARGIN", new_y="NEXT")
-            pdf.set_left_margin(orig_lmargin)
-            pdf.set_x(orig_lmargin)
+            pdf.set_x(margin + 0.15)
+            pdf.cell(w=0.15, h=0.2 * spacing, text=chr(149)) 
+            pdf.multi_cell(w=0, h=0.2 * spacing, text=bullet, markdown=True)
 
-    # Render Sections
+    # Rendering
     for sec_key in settings['section_order']:
-        
-        if sec_key == 'core_Summary' and data.get('summary', '').strip():
-            add_section_header(data.get('heading_summary', 'Professional Summary'))
+        if sec_key == 'core_Summary' and data.get('summary'):
+            add_section_header(data.get('heading_summary', 'Summary'))
             pdf.set_font(font_fam, "", base_font)
-            pdf.multi_cell(w=0, h=0.2 * spacing, text=sanitize(data['summary']), markdown=True, new_x="LMARGIN", new_y="NEXT")
+            pdf.multi_cell(0, 0.2 * spacing, sanitize(data['summary']), markdown=True)
             pdf.ln(0.1)
 
-        elif sec_key == 'core_Education' and any(ed.get('school') for ed in data.get('education',[])):
+        elif sec_key == 'core_Education':
             add_section_header(data.get('heading_education', 'Education'))
-            for ed in data['education']:
+            for ed in data.get('education', []):
                 if not ed.get('school'): continue
-                check_page_break(0.6)
                 add_left_right(ed['school'], ed.get('location', ''), "B", "B")
                 add_left_right(ed.get('degree', ''), ed.get('date', ''), "I", "I")
                 if ed.get('details'):
                     pdf.set_font(font_fam, "", base_font)
-                    pdf.multi_cell(w=0, h=0.2 * spacing, text=sanitize(ed['details']), markdown=True, new_x="LMARGIN", new_y="NEXT")
+                    pdf.multi_cell(0, 0.18, sanitize(ed['details']), markdown=True)
             pdf.ln(0.1)
 
         elif sec_key in ['core_Experience', 'core_Leadership']:
             list_key = 'experience' if sec_key == 'core_Experience' else 'leadership'
-            name_key = 'company' if sec_key == 'core_Experience' else 'organization'
-            if any(item.get(name_key) for item in data.get(list_key,[])):
-                add_section_header(data.get(f'heading_{list_key}', list_key.capitalize()))
-                for item in data[list_key]:
-                    if not item.get(name_key): continue
-                    check_page_break(0.6)
-                    add_left_right(item[name_key], item.get('location', ''), "B", "B")
-                    add_left_right(item.get('title', ''), item.get('date', ''), "I", "I")
-                    print_bullets(item.get('bullets', ''))
-                pdf.ln(0.1)
+            add_section_header(data.get(f'heading_{list_key}', list_key.capitalize()))
+            for item in data.get(list_key, []):
+                add_left_right(item.get('company' if list_key=='experience' else 'organization', ''), item.get('location', ''), "B", "B")
+                add_left_right(item.get('title', ''), item.get('date', ''), "I", "I")
+                print_bullets(item.get('bullets', ''))
+            pdf.ln(0.1)
 
-        elif sec_key == 'core_Projects' and any(p.get('title') for p in data.get('projects',[])):
-            add_section_header(data.get('heading_projects', 'Academic & Personal Projects'))
-            for p in data['projects']:
-                if not p.get('title'): continue
-                check_page_break(0.6)
-                add_left_right(p['title'], p.get('date', ''), "B", "B")
-                if p.get('role'): add_left_right(p['role'], "", "I", "")
+        elif sec_key == 'core_Projects':
+            add_section_header(data.get('heading_projects', 'Projects'))
+            for p in data.get('projects', []):
+                add_left_right(p.get('title',''), p.get('date',''), "B", "B")
+                if p.get('role'): pdf.cell(0, 0.18, sanitize(p['role']), ln=True, font_style="I")
                 print_bullets(p.get('bullets', ''))
             pdf.ln(0.1)
 
-        elif sec_key == 'core_Skills' and any(data.get('skills', {}).values()):
+        elif sec_key == 'core_Skills':
+            # --- HARVARD STYLE CONSOLIDATED SKILLS (Advice A) ---
             add_section_header(data.get('heading_skills', 'Skills & Interests'))
-            pdf.set_font(font_fam, "", base_font)
-            for label, key in[("Technical", "technical"), ("Languages", "languages"), ("Interests", "interests")]:
-                val = data['skills'].get(key, '')
-                if val:
-                    check_page_break(0.2)
-                    pdf.set_font(font_fam, "B", base_font)
-                    label_width = pdf.get_string_width(label + ": ")
-                    pdf.cell(w=label_width, h=0.2 * spacing, text=sanitize(label + ": "))
-                    pdf.set_font(font_fam, "", base_font)
-                    pdf.multi_cell(w=0, h=0.2 * spacing, text=sanitize(val), markdown=True, new_x="LMARGIN", new_y="NEXT")
+            
+            skills_html = ""
+            sk_data = data.get('skills', {})
+            parts = []
+            if sk_data.get('technical'): parts.append(f"**Technical Skills:** {sk_data['technical']}")
+            if sk_data.get('languages'): parts.append(f"**Languages:** {sk_data['languages']}")
+            if sk_data.get('interests'): parts.append(f"**Interests:** {sk_data['interests']}")
+            
+            if parts:
+                pdf.set_font(font_fam, "", base_font)
+                # Join with spaces or semicolon for Harvard look
+                full_skills_text = " ".join(parts)
+                pdf.multi_cell(w=0, h=0.2 * spacing, text=sanitize(full_skills_text), markdown=True)
             pdf.ln(0.1)
 
         elif sec_key.startswith('custom_'):
             cid = sec_key.split('_')[1]
             c_sec = next((cs for cs in data.get('custom_sections',[]) if cs.get('id') == cid), None)
-            if c_sec and c_sec['title'].strip() and c_sec['content'].strip():
+            if c_sec:
                 add_section_header(c_sec['title'])
                 pdf.set_font(font_fam, "", base_font)
-                pdf.multi_cell(w=0, h=0.2 * spacing, text=sanitize(c_sec['content']), markdown=True, new_x="LMARGIN", new_y="NEXT")
+                pdf.multi_cell(0, 0.2 * spacing, sanitize(c_sec['content']), markdown=True)
                 pdf.ln(0.1)
 
-    return bytes(pdf.output()), pdf.page_no()
+    return pdf.output(), pdf.page_no()
 
-# --- STREAMLIT UI SETUP ---
+# --- STREAMLIT UI ---
 st.set_page_config(page_title="Harvard Resume Builder", layout="wide")
-
-# Unique Generator ID for global refreshes
-if 'ui_gen_id' not in st.session_state:
-    st.session_state.ui_gen_id = str(uuid.uuid4())
-
-# Init Session State
+if 'ui_gen_id' not in st.session_state: st.session_state.ui_gen_id = str(uuid.uuid4())
 if 'r_data' not in st.session_state:
     st.session_state.r_data = {
         'name': '', 'address': '', 'phone': '', 'email': '', 'linkedin': '', 'summary': '',
         'heading_summary': 'Professional Summary', 'heading_education': 'Education', 
         'heading_experience': 'Experience', 'heading_projects': 'Projects', 
-        'heading_leadership': 'Leadership & Extracurriculars', 'heading_skills': 'Skills',
+        'heading_leadership': 'Leadership & Extracurriculars', 'heading_skills': 'Skills & Interests',
         'education':[{'school': '', 'location': '', 'degree': '', 'date': '', 'details': ''}],
         'experience':[{'company': '', 'location': '', 'title': '', 'date': '', 'bullets': ''}],
         'projects': [], 'leadership':[],
         'skills': {'technical': '', 'languages': '', 'interests': ''},
         'custom_sections':[], 'photo_bytes': None
     }
-
 if 'section_order' not in st.session_state:
-    st.session_state.section_order =['core_Summary', 'core_Education', 'core_Experience', 'core_Projects', 'core_Leadership', 'core_Skills']
+    st.session_state.section_order = ['core_Education', 'core_Experience', 'core_Projects', 'core_Leadership', 'core_Skills']
 
-if 'pdf_preview_bytes' not in st.session_state: st.session_state.pdf_preview_bytes = None
-if 'page_count_warning' not in st.session_state: st.session_state.page_count_warning = False
-if 'ai_success_msg' not in st.session_state: st.session_state.ai_success_msg = None
-
-# --- SIDEBAR: SAVE / LOAD SYSTEM ---
+# Sidebar & Load logic...
 with st.sidebar:
-    st.header("💾 Save / Load Project")
-    st.info("Don't lose your progress! Save your resume data to your computer, and load it later.")
-    
-    clean_data = strip_internal_ids(st.session_state.r_data)
-    json_str = json.dumps(clean_data, indent=2)
-    st.download_button("⬇️ Download Resume Data (.json)", data=json_str, file_name="my_resume_data.json", mime="application/json")
-    st.divider()
-    
-    uploaded_json = st.file_uploader("⬆️ Load Resume Data (.json)", type="json")
-    if uploaded_json is not None:
-        if st.button("Load Data", type="primary"):
-            loaded_data = json.load(uploaded_json)
-            preserved_photo = st.session_state.r_data.get('photo_bytes')
-            st.session_state.r_data.update(loaded_data)
-            st.session_state.r_data['photo_bytes'] = preserved_photo
-            
-            for cs in st.session_state.r_data.get('custom_sections',[]):
-                if f"custom_{cs.get('id')}" not in st.session_state.section_order:
-                    st.session_state.section_order.append(f"custom_{cs.get('id')}")
-                    
-            st.session_state.ui_gen_id = str(uuid.uuid4()) # Global UI refresh
-            st.success("Resume loaded successfully!")
-            st.rerun()
-
-st.title("🎓 The Ultimate Harvard Resume Builder")
-
-# --- DISPLAY AI SUCCESS FEEDBACK ---
-if st.session_state.ai_success_msg:
-    st.success(f"✨ **AI Updates Applied:** {st.session_state.ai_success_msg}")
-    st.session_state.ai_success_msg = None # Clear it so it doesn't stay forever
-
-# --- STEP 1: IMPORT ---
-st.markdown("### 📄 Step 1: Import Your Data")
-col_pdf, col_text = st.columns(2)
-with col_pdf: uploaded_file = st.file_uploader("1️⃣ Upload Old Resume (PDF)", type="pdf")
-with col_text: pasted_text = st.text_area("2️⃣ Or Paste Text (Instructions, updates, or full text)", height=100)
-
-def process_input(merge):
-    combined = ""
-    if uploaded_file:
-        try:
-            uploaded_file.seek(0)
-            for page in PyPDF2.PdfReader(uploaded_file).pages: 
-                combined += page.extract_text() + "\n"
-        except Exception as e:
-            st.error(f"Error reading PDF: {e}")
-            
-    if pasted_text: 
-        combined += "\n\n--- NEW ADDITIONAL INSTRUCTIONS / TEXT ---\n" + pasted_text 
-        
-    if combined.strip():
-        with st.spinner("⚡ Groq AI is analyzing and updating your resume..."):
-            if auto_fill_with_ai(combined, merge=merge): 
-                st.rerun()
-    else: 
-        st.warning("Upload a PDF or paste text first.")
-
-col_b1, col_b2, _ = st.columns([1, 1, 2])
-with col_b1:
-    if st.button("✨ Generate Fresh Resume", type="primary", help="Overwrites everything and starts fresh."): process_input(False)
-with col_b2:
-    if st.button("➕ Merge with Current", help="Applies your pasted updates to your current working resume."): process_input(True)
-
-st.divider()
-
-# --- STEP 2: EDITING ---
-st.markdown("### 📝 Step 2: Edit Inside Categories")
-tabs = st.tabs(["👤 Info & Summary", "🎓 Education", "💼 Experience", "🚀 Projects", "🤝 Leadership", "🛠️ Skills", "⭐ Custom"])
-
-uid = st.session_state.ui_gen_id
-
-def move_item(lst, idx, direction):
-    if direction == 'up' and idx > 0:
-        lst[idx], lst[idx-1] = lst[idx-1], lst[idx]
-    elif direction == 'down' and idx < len(lst)-1:
-        lst[idx], lst[idx+1] = lst[idx+1], lst[idx]
-
-with tabs[0]: 
-    c_text, c_img = st.columns([2, 1])
-    with c_text:
-        st.session_state.r_data['name'] = st.text_input("Full Name", st.session_state.r_data.get('name', ''), key=f"n_{uid}")
-        c1, c2 = st.columns(2)
-        st.session_state.r_data['address'] = c1.text_input("City, State", st.session_state.r_data.get('address', ''), key=f"a_{uid}")
-        st.session_state.r_data['phone'] = c2.text_input("Phone", st.session_state.r_data.get('phone', ''), key=f"p_{uid}")
-        st.session_state.r_data['email'] = c1.text_input("Email", st.session_state.r_data.get('email', ''), key=f"e_{uid}")
-        st.session_state.r_data['linkedin'] = c2.text_input("LinkedIn URL", st.session_state.r_data.get('linkedin', ''), key=f"l_{uid}")
-    with c_img:
-        photo = st.file_uploader("Profile Photo (Creative Mode Only)", type=["jpg", "png", "jpeg"])
-        if photo: st.session_state.r_data['photo_bytes'] = photo.getvalue()
-    
-    st.divider()
-    st.session_state.r_data['heading_summary'] = st.text_input("Summary Section Title", st.session_state.r_data.get('heading_summary', 'Professional Summary'), key=f"hs_{uid}")
-    st.session_state.r_data['summary'] = st.text_area("Professional Summary Text", st.session_state.r_data.get('summary', ''), height=100, key=f"sum_{uid}")
-
-with tabs[1]: 
-    st.session_state.r_data['heading_education'] = st.text_input("Education Section Title", st.session_state.r_data.get('heading_education', 'Education'), key=f'he_{uid}')
-    for i, ed in enumerate(st.session_state.r_data['education']):
-        if '_id' not in ed: ed['_id'] = str(uuid.uuid4())
-        eid = ed['_id']
-        with st.expander(f"{ed.get('school', 'New School')} - {ed.get('degree', '')}", expanded=True):
-            cu, cd, cx, _ = st.columns([1,1,1,7])
-            if cu.button("⬆️", key=f"edu_u_{eid}"): move_item(st.session_state.r_data['education'], i, 'up'); st.rerun()
-            if cd.button("⬇️", key=f"edu_d_{eid}"): move_item(st.session_state.r_data['education'], i, 'down'); st.rerun()
-            if cx.button("🗑️", key=f"edu_x_{eid}"): st.session_state.r_data['education'].pop(i); st.rerun()
-            c1, c2 = st.columns(2)
-            ed['school'] = c1.text_input("School", ed.get('school', ''), key=f"es_{eid}_{uid}")
-            ed['location'] = c2.text_input("Location", ed.get('location', ''), key=f"el_{eid}_{uid}")
-            ed['degree'] = c1.text_input("Degree", ed.get('degree', ''), key=f"edg_{eid}_{uid}")
-            ed['date'] = c2.text_input("Date", ed.get('date', ''), key=f"edt_{eid}_{uid}")
-            ed['details'] = st.text_input("GPA / Honors", ed.get('details', ''), key=f"eh_{eid}_{uid}")
-    if st.button("➕ Add School"): st.session_state.r_data['education'].append({'_id': str(uuid.uuid4())}); st.rerun()
-
-with tabs[2]: 
-    st.session_state.r_data['heading_experience'] = st.text_input("Experience Section Title", st.session_state.r_data.get('heading_experience', 'Experience'), key=f'hex_{uid}')
-    for i, exp in enumerate(st.session_state.r_data['experience']):
-        if '_id' not in exp: exp['_id'] = str(uuid.uuid4())
-        eid = exp['_id']
-        with st.expander(f"{exp.get('company', 'New Job')} - {exp.get('title', '')}", expanded=True):
-            cu, cd, cx, _ = st.columns([1,1,1,7])
-            if cu.button("⬆️", key=f"exp_u_{eid}"): move_item(st.session_state.r_data['experience'], i, 'up'); st.rerun()
-            if cd.button("⬇️", key=f"exp_d_{eid}"): move_item(st.session_state.r_data['experience'], i, 'down'); st.rerun()
-            if cx.button("🗑️", key=f"exp_x_{eid}"): st.session_state.r_data['experience'].pop(i); st.rerun()
-            c1, c2 = st.columns(2)
-            exp['company'] = c1.text_input("Company", exp.get('company', ''), key=f"xc_{eid}_{uid}")
-            exp['location'] = c2.text_input("Location", exp.get('location', ''), key=f"xl_{eid}_{uid}")
-            exp['title'] = c1.text_input("Title", exp.get('title', ''), key=f"xt_{eid}_{uid}")
-            exp['date'] = c2.text_input("Date", exp.get('date', ''), key=f"xdt_{eid}_{uid}")
-            exp['bullets'] = st.text_area("Bullets (Use **text** for bold)", exp.get('bullets', ''), height=120, key=f"xb_{eid}_{uid}")
-            if st.button("✨ Polish Bullets (AI)", key=f"xai_{eid}"):
-                with st.spinner("Rewriting using STAR method..."):
-                    exp['bullets'] = polish_bullet_with_ai(exp['bullets'])
-                    exp['_id'] = str(uuid.uuid4()) # Specific refresh!
-                    st.rerun()
-    if st.button("➕ Add Job"): st.session_state.r_data['experience'].append({'_id': str(uuid.uuid4())}); st.rerun()
-
-with tabs[3]: 
-    st.session_state.r_data['heading_projects'] = st.text_input("Projects Section Title", st.session_state.r_data.get('heading_projects', 'Projects'), key=f'hpj_{uid}')
-    for i, p in enumerate(st.session_state.r_data['projects']):
-        if '_id' not in p: p['_id'] = str(uuid.uuid4())
-        eid = p['_id']
-        with st.expander(f"{p.get('title', 'New Project')}", expanded=True):
-            cu, cd, cx, _ = st.columns([1,1,1,7])
-            if cu.button("⬆️", key=f"prj_u_{eid}"): move_item(st.session_state.r_data['projects'], i, 'up'); st.rerun()
-            if cd.button("⬇️", key=f"prj_d_{eid}"): move_item(st.session_state.r_data['projects'], i, 'down'); st.rerun()
-            if cx.button("🗑️", key=f"prj_x_{eid}"): st.session_state.r_data['projects'].pop(i); st.rerun()
-            c1, c2 = st.columns(2)
-            p['title'] = c1.text_input("Project Name", p.get('title', ''), key=f"pt_{eid}_{uid}")
-            p['date'] = c2.text_input("Date", p.get('date', ''), key=f"pdt_{eid}_{uid}")
-            p['role'] = c1.text_input("Role / Tech Stack", p.get('role', ''), key=f"pr_{eid}_{uid}")
-            p['bullets'] = st.text_area("Bullets", p.get('bullets', ''), height=100, key=f"pb_{eid}_{uid}")
-            if st.button("✨ Polish Bullets (AI)", key=f"pai_{eid}"):
-                with st.spinner("Rewriting..."):
-                    p['bullets'] = polish_bullet_with_ai(p['bullets'])
-                    p['_id'] = str(uuid.uuid4()) # Specific refresh!
-                    st.rerun()
-    if st.button("➕ Add Project"): st.session_state.r_data['projects'].append({'_id': str(uuid.uuid4())}); st.rerun()
-
-with tabs[4]: 
-    st.session_state.r_data['heading_leadership'] = st.text_input("Leadership Section Title", st.session_state.r_data.get('heading_leadership', 'Leadership & Extracurriculars'), key=f'hld_{uid}')
-    for i, l in enumerate(st.session_state.r_data['leadership']):
-        if '_id' not in l: l['_id'] = str(uuid.uuid4())
-        eid = l['_id']
-        with st.expander(f"{l.get('organization', 'New Org')}", expanded=True):
-            cu, cd, cx, _ = st.columns([1,1,1,7])
-            if cu.button("⬆️", key=f"ld_u_{eid}"): move_item(st.session_state.r_data['leadership'], i, 'up'); st.rerun()
-            if cd.button("⬇️", key=f"ld_d_{eid}"): move_item(st.session_state.r_data['leadership'], i, 'down'); st.rerun()
-            if cx.button("🗑️", key=f"ld_x_{eid}"): st.session_state.r_data['leadership'].pop(i); st.rerun()
-            c1, c2 = st.columns(2)
-            l['organization'] = c1.text_input("Organization", l.get('organization', ''), key=f"lo_{eid}_{uid}")
-            l['location'] = c2.text_input("Location", l.get('location', ''), key=f"ll_{eid}_{uid}")
-            l['title'] = c1.text_input("Title/Role", l.get('title', ''), key=f"lt_{eid}_{uid}")
-            l['date'] = c2.text_input("Date", l.get('date', ''), key=f"ldt_{eid}_{uid}")
-            l['bullets'] = st.text_area("Bullets", l.get('bullets', ''), height=100, key=f"lb_{eid}_{uid}")
-            if st.button("✨ Polish Bullets (AI)", key=f"lai_{eid}"):
-                with st.spinner("Rewriting..."):
-                    l['bullets'] = polish_bullet_with_ai(l['bullets'])
-                    l['_id'] = str(uuid.uuid4()) # Specific refresh!
-                    st.rerun()
-    if st.button("➕ Add Leadership"): st.session_state.r_data['leadership'].append({'_id': str(uuid.uuid4())}); st.rerun()
-
-with tabs[5]: 
-    st.session_state.r_data['heading_skills'] = st.text_input("Skills Section Title", st.session_state.r_data.get('heading_skills', 'Skills & Interests'), key=f"hsk_{uid}")
-    sk = st.session_state.r_data['skills']
-    sk['technical'] = st.text_area("Technical Skills (Use commas)", sk.get('technical', ''), key=f"st_{uid}")
-    sk['languages'] = st.text_input("Languages", sk.get('languages', ''), key=f"sl_{uid}")
-    sk['interests'] = st.text_input("Interests", sk.get('interests', ''), key=f"si_{uid}")
-
-with tabs[6]: 
-    st.info("You can add extra blocks like 'Certifications' or 'Publications' here.")
-    for i, sec in enumerate(st.session_state.r_data.get('custom_sections',[])):
-        if '_id' not in sec: sec['_id'] = str(uuid.uuid4())
-        eid = sec['_id']
-        with st.expander(f"Custom: {sec.get('title', 'Unnamed Section')}", expanded=True):
-            cu, cd, cx, _ = st.columns([1,1,1,7])
-            if cu.button("⬆️", key=f"cs_u_{eid}"): move_item(st.session_state.r_data['custom_sections'], i, 'up'); st.rerun()
-            if cd.button("⬇️", key=f"cs_d_{eid}"): move_item(st.session_state.r_data['custom_sections'], i, 'down'); st.rerun()
-            if cx.button("🗑️", key=f"cs_x_{eid}"):
-                if f"custom_{sec.get('id')}" in st.session_state.section_order:
-                    st.session_state.section_order.remove(f"custom_{sec.get('id')}")
-                st.session_state.r_data['custom_sections'].pop(i)
-                st.rerun()
-            sec['title'] = st.text_input("Section Header", sec.get('title', ''), key=f"ct_{eid}_{uid}")
-            sec['content'] = st.text_area("Content", sec.get('content', ''), key=f"cc_{eid}_{uid}")
-    if st.button("➕ Add Custom Block"):
-        nid = str(uuid.uuid4().hex)
-        st.session_state.r_data['custom_sections'].append({'id': nid, '_id': str(uuid.uuid4()), 'title': '', 'content': ''})
-        st.session_state.section_order.append(f'custom_{nid}')
+    st.header("💾 Save / Load")
+    st.download_button("⬇️ Export Data", data=json.dumps(strip_internal_ids(st.session_state.r_data)), file_name="resume.json")
+    uploaded_json = st.file_uploader("⬆️ Import Data", type="json")
+    if uploaded_json and st.button("Load"):
+        st.session_state.r_data.update(json.load(uploaded_json))
         st.rerun()
 
+st.title("🎓 Harvard Resume Builder")
+
+# Import Section...
+st.markdown("### 📄 Step 1: Import")
+col_pdf, col_text = st.columns(2)
+with col_pdf: uploaded_file = st.file_uploader("Upload PDF", type="pdf")
+with col_text: pasted_text = st.text_area("Or Paste Text / Instructions", height=100)
+
+if st.button("✨ Process with AI"):
+    combined = pasted_text
+    if uploaded_file:
+        reader = PyPDF2.PdfReader(uploaded_file)
+        for page in reader.pages: combined += page.extract_text()
+    if combined: 
+        auto_fill_with_ai(combined)
+        st.rerun()
+
+# Editing Tabs...
 st.divider()
+tabs = st.tabs(["👤 Info", "🎓 Education", "💼 Experience", "🚀 Projects", "🛠️ Skills", "⭐ Custom"])
+uid = st.session_state.ui_gen_id
 
-# --- STEP 3: REORDER SECTIONS ---
-st.markdown("### 🗂️ Step 3: Global Category Order")
-st.info("Use the arrows to reorder how the sections appear on your final PDF.")
-for i, sec_key in enumerate(st.session_state.section_order):
-    c1, c2, c3 = st.columns([1, 1, 12])
-    if c1.button("⬆️", key=f"gu_{sec_key}_{uid}"): move_item(st.session_state.section_order, i, "up"); st.rerun()
-    if c2.button("⬇️", key=f"gd_{sec_key}_{uid}"): move_item(st.session_state.section_order, i, "down"); st.rerun()
-    
-    if sec_key.startswith('core_'): 
-        name = st.session_state.r_data.get(f"heading_{sec_key.split('_')[1].lower()}", sec_key.split('_')[1])
-    elif sec_key.startswith('custom_'):
-        cs = next((c for c in st.session_state.r_data['custom_sections'] if c.get('id') == sec_key.split('_')[1]), None)
-        if cs: 
-            name = f"Custom Section: {cs.get('title', '[Unnamed]')}"
-        else:
-            name = "Unknown Block"
-            
-    c3.markdown(f"**{name}**")
+with tabs[0]:
+    d = st.session_state.r_data
+    d['name'] = st.text_input("Full Name", d['name'], key=f"n_{uid}")
+    c1, c2 = st.columns(2)
+    d['address'] = c1.text_input("Location", d['address'], key=f"a_{uid}")
+    d['phone'] = c2.text_input("Phone", d['phone'], key=f"p_{uid}")
+    d['email'] = c1.text_input("Email", d['email'], key=f"e_{uid}")
+    d['linkedin'] = c2.text_input("LinkedIn", d['linkedin'], key=f"l_{uid}")
+    d['summary'] = st.text_area("Summary (Optional)", d['summary'], key=f"s_{uid}")
 
+with tabs[1]:
+    for i, ed in enumerate(st.session_state.r_data['education']):
+        with st.expander(f"School {i+1}", expanded=True):
+            ed['school'] = st.text_input("School", ed.get('school'), key=f"ed_s_{i}_{uid}")
+            ed['degree'] = st.text_input("Degree", ed.get('degree'), key=f"ed_d_{i}_{uid}")
+    if st.button("Add Education"): st.session_state.r_data['education'].append({}); st.rerun()
+
+with tabs[2]:
+    for i, ex in enumerate(st.session_state.r_data['experience']):
+        with st.expander(f"Job {i+1}", expanded=True):
+            ex['company'] = st.text_input("Company", ex.get('company'), key=f"ex_c_{i}_{uid}")
+            ex['bullets'] = st.text_area("Bullets", ex.get('bullets'), key=f"ex_b_{i}_{uid}")
+            if st.button(f"Polish Bullets {i}", key=f"p_{i}"):
+                ex['bullets'] = polish_bullet_with_ai(ex['bullets'])
+                st.rerun()
+    if st.button("Add Experience"): st.session_state.r_data['experience'].append({}); st.rerun()
+
+with tabs[4]:
+    st.info("Harvard Style: These will be combined into one 'Skills & Interests' block.")
+    sk = st.session_state.r_data['skills']
+    sk['technical'] = st.text_area("Technical Skills", sk.get('technical'), help="Comma separated", key=f"sk_t_{uid}")
+    sk['languages'] = st.text_input("Languages", sk.get('languages'), key=f"sk_l_{uid}")
+    sk['interests'] = st.text_input("Interests", sk.get('interests'), key=f"sk_i_{uid}")
+
+# Order & Export...
 st.divider()
+st.markdown("### 👁️ Step 3: Export")
+strict = st.toggle("Strict Harvard Mode", value=True)
 
-# --- STEP 4: EXPORT & PDF ---
-st.markdown("### 👁️ Step 4: Alignment Studio & Export")
-
-st_strict_mode = st.toggle("🎓 Strict Harvard Compliance Mode", value=True, 
-                           help="Locks formatting to standard US Corporate / Ivy League standards.")
-
-if st_strict_mode:
-    st.info("🔒 Strict Mode ON: Formatting is locked for maximum ATS compliance and professionalism.")
+if strict:
     settings = {
         'strict_mode': True, 'paper_size': 'Letter', 'font_family': 'Times', 'header_align': 'Center',
         'margin': 0.75, 'font_size': 11, 'header_size': 16, 'spacing': 1.0,
-        'photo_position': 'Hide Photo', 'photo_size': 0, 'photo_x_offset': 0, 'photo_y_offset': 0,
-        'accent_rgb': (0,0,0), 'show_grid': False, 'section_order': st.session_state.section_order
+        'photo_position': 'Hide Photo', 'photo_size': 0, 'accent_rgb': (0,0,0),
+        'section_order': st.session_state.section_order
     }
 else:
-    st.warning("🎨 Creative Mode ON: Best for European CVs or design portfolios.")
-    with st.expander("🎨 Advanced Design Settings", expanded=True):
-        col_set1, col_set2, col_set3, col_set4 = st.columns(4)
-        with col_set1:
-            paper_size = st.selectbox("Paper Size",["Letter", "A4"])
-            font_family = st.selectbox("Font Style",["Times", "Arial", "Helvetica", "Courier"])
-            header_align = st.selectbox("Header Align",["Center", "Left", "Right"])
-        with col_set2:
-            margin_size = st.slider("Margins (in)", 0.3, 1.5, 0.75, 0.05)
-            font_size = st.slider("Base Font Size", 9, 12, 11, 1)
-            header_size = st.slider("Header Text Size", 12, 24, 16, 1)
-        with col_set3:
-            line_spacing = st.slider("Line Spacing", 0.8, 1.5, 1.0, 0.1)
-            photo_pos = st.selectbox("Photo Pos",["Top Right", "Top Left", "Hide Photo"])
-            photo_size = st.slider("Photo Width", 0.5, 2.0, 1.0, 0.1)
-            px_off = st.slider("Move Left/Right", -3.0, 3.0, 0.0, 0.05)
-            py_off = st.slider("Move Up/Down", -3.0, 3.0, 0.0, 0.05)
-        with col_set4:
-            show_grid = st.toggle("📏 Show Ruler Grid", False)
-            accent_rgb = hex_to_rgb(st.color_picker("Accent Color", "#000000"))
-            
     settings = {
-        'strict_mode': False, 'paper_size': paper_size, 'font_family': font_family, 'header_align': header_align,
-        'margin': margin_size, 'font_size': font_size, 'header_size': header_size, 'spacing': line_spacing,
-        'photo_position': photo_pos, 'photo_size': photo_size, 'photo_x_offset': px_off, 'photo_y_offset': py_off,
-        'accent_rgb': accent_rgb, 'show_grid': show_grid, 'section_order': st.session_state.section_order
+        'strict_mode': False, 'paper_size': 'Letter', 'font_family': 'Arial', 'header_align': 'Left',
+        'margin': 0.5, 'font_size': 10, 'header_size': 14, 'spacing': 1.0,
+        'photo_position': 'Hide Photo', 'photo_size': 0, 'accent_rgb': (0,0,0),
+        'section_order': st.session_state.section_order
     }
 
-col_gen, col_dl = st.columns([1, 4])
+if st.button("🔄 Generate Preview"):
+    pdf_bytes, pages = generate_harvard_pdf(st.session_state.r_data, settings)
+    st.session_state.pdf_preview = pdf_bytes
+    if pages > 1: st.warning("⚠️ Resume exceeds 1 page!")
 
-with col_gen:
-    if st.button("🔄 Update Live Preview", type="primary", use_container_width=True):
-        pdf_bytes, pages = generate_harvard_pdf(st.session_state.r_data, settings)
-        st.session_state.pdf_preview_bytes = pdf_bytes
-        st.session_state.page_count_warning = pages > 1
-
-if st.session_state.page_count_warning:
-    st.error("🚨 WARNING: Your resume is longer than ONE PAGE! For strict Harvard/Finance standards, you should shorten your bullet points or lower your font size/margins.")
-
-if st.session_state.pdf_preview_bytes:
-    with col_dl:
-        st.download_button(
-            label="⬇️ Download Final PDF",
-            data=st.session_state.pdf_preview_bytes,
-            file_name="Harvard_Style_Resume.pdf",
-            mime="application/pdf",
-            use_container_width=True
-        )
-        
-    b64_pdf = base64.b64encode(st.session_state.pdf_preview_bytes).decode('utf-8')
-    canvas_html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
-        <style>
-            body {{ background-color: #2e3033; margin: 0; padding: 20px; display: flex; flex-direction: column; align-items: center; }}
-            canvas {{ box-shadow: 0px 4px 15px rgba(0,0,0,0.5); max-width: 100%; margin-bottom: 20px; }}
-        </style>
-    </head>
-    <body>
-        <div id="pdf-container"></div>
-        <script>
-            var binaryData = atob("{b64_pdf}");
-            var pdfjsLib = window['pdfjs-dist/build/pdf'];
-            pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
-
-            var loadingTask = pdfjsLib.getDocument({{data: binaryData}});
-            loadingTask.promise.then(function(pdf) {{
-                for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {{
-                    pdf.getPage(pageNum).then(function(page) {{
-                        var scale = 1.5; 
-                        var viewport = page.getViewport({{scale: scale}});
-                        var canvas = document.createElement('canvas');
-                        var context = canvas.getContext('2d');
-                        canvas.height = viewport.height;
-                        canvas.width = viewport.width;
-                        document.getElementById('pdf-container').appendChild(canvas);
-                        var renderContext = {{ canvasContext: context, viewport: viewport }};
-                        page.render(renderContext);
-                    }});
-                }}
-            }});
-        </script>
-    </body>
-    </html>
-    """
-    components.html(canvas_html, height=900, scrolling=True)
+if 'pdf_preview' in st.session_state:
+    st.download_button("⬇️ Download PDF", data=st.session_state.pdf_preview, file_name="resume.pdf")
+    b64 = base64.b64encode(st.session_state.pdf_preview).decode()
+    pdf_display = f'<iframe src="data:application/pdf;base64,{b64}" width="100%" height="800" type="application/pdf"></iframe>'
+    st.markdown(pdf_display, unsafe_allow_html=True)
