@@ -2,37 +2,35 @@ import streamlit as st
 import streamlit.components.v1 as components
 import PyPDF2
 from fpdf import FPDF 
-from PIL import Image
 import base64
 import json
 import io
 import os
-import tempfile
-import uuid
 import re
+import uuid
 from groq import Groq
 
-# --- CONFIG ---
-st.set_page_config(page_title="Harvard Live Resume Builder", layout="wide")
+# --- INITIAL SETUP ---
+st.set_page_config(page_title="Harvard Resume Builder Pro", layout="wide")
 
-# --- SECURE API KEY ---
 try:
     GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
 except KeyError:
-    st.error("⚠️ Groq API key not found in Streamlit Secrets!")
+    st.error("⚠️ Groq API key not found! Add it to Streamlit Secrets.")
     st.stop()
 
 client = Groq(api_key=GROQ_API_KEY)
 
-# --- UTILITIES ---
+# --- UTILITIES & SANITIZATION ---
 def sanitize(text):
     if not text: return ""
-    replacements = {'“': '"', '”': '"', "‘": "'", "’": "'", '–': '-', '—': '-', '•': '*'}
-    for k, v in replacements.items(): text = text.replace(k, v)
+    # Map common non-latin-1 characters to safe versions
+    rep = {'“': '"', '”': '"', "‘": "'", "’": "'", '–': '-', '—': '-', '•': '*', '…': '...'}
+    for k, v in rep.items(): text = text.replace(k, v)
     return text.encode('latin-1', 'replace').decode('latin-1')
 
 def clean_url(url):
-    return re.sub(r"^(https?://)?(www\.)?", "", url).rstrip("/")
+    return re.sub(r"^(https?://)?(www\.)?", "", url or "").rstrip("/")
 
 def strip_internal_ids(data):
     if isinstance(data, dict):
@@ -41,194 +39,209 @@ def strip_internal_ids(data):
         return [strip_internal_ids(v) for v in data]
     return data
 
-# --- PDF ENGINE (HARVARD OCS STANDARDS) ---
-class HarvardPDF(FPDF):
-    def section_header(self, label, accent_rgb):
-        self.set_font("Times", "B", 11)
-        self.set_text_color(*accent_rgb)
-        self.cell(0, 0.2, label.upper(), ln=1)
-        self.set_draw_color(*accent_rgb)
-        self.line(self.get_x(), self.get_y(), self.get_x() + 7.5, self.get_y())
-        self.ln(0.1)
-        self.set_text_color(0, 0, 0)
+# --- AI LOGIC ---
+def polish_bullet_ai(text):
+    prompt = f"Rewrite these resume bullets using the STAR method (Action Verb + Task + Result). Keep it punchy and professional:\n\n{text}"
+    try:
+        res = client.chat.completions.create(model="llama-3.3-70b-versatile", messages=[{"role": "user", "content": prompt}])
+        return res.choices[0].message.content.strip()
+    except:
+        return text
 
-def generate_pdf(data, settings):
+# --- PDF GENERATION ENGINE ---
+class HarvardPDF(FPDF):
+    def header(self): pass
+    def footer(self): pass
+
+def generate_harvard_pdf(data, settings):
     pdf = HarvardPDF(unit="in", format="Letter")
     pdf.set_auto_page_break(auto=True, margin=settings['margin'])
     pdf.add_page()
     
     m = settings['margin']
-    pw = 8.5
-    uw = pw - (2 * m)
+    uw = 8.5 - (2 * m)
     accent = settings['accent_rgb']
-    
-    # Header
-    pdf.set_font("Times", "B", settings['header_size'])
+    f_size = settings['font_size']
+    spacing = settings['spacing']
+
+    # 1. HEADER
+    pdf.set_font("Times", "B", 16)
     pdf.cell(uw, 0.25, sanitize(data['name']).upper(), align='C', ln=1)
     
     pdf.set_font("Times", "", 10)
-    contact = [data['address'], data['phone'], data['email'], clean_url(data['linkedin'])]
+    contact = [data.get('address'), data.get('phone'), data.get('email'), clean_url(data.get('linkedin'))]
     pdf.cell(uw, 0.2, sanitize(" | ".join([p for p in contact if p])), align='C', ln=1)
     pdf.ln(0.15)
 
-    # Sections
+    # 2. SECTIONS
     for sec_key in settings['section_order']:
-        # 1. Summary
+        # Fetching titles and data blocks
         if sec_key == 'core_Summary' and data['summary']:
-            pdf.section_header(data['heading_summary'], accent)
-            pdf.set_font("Times", "", settings['font_size'])
-            pdf.multi_cell(uw, 0.18 * settings['spacing'], sanitize(data['summary']))
+            pdf.set_font("Times", "B", f_size)
+            pdf.cell(uw, 0.2, data['heading_summary'].upper(), ln=1)
+            pdf.line(m, pdf.get_y(), 8.5-m, pdf.get_y())
+            pdf.ln(0.05)
+            pdf.set_font("Times", "", f_size)
+            pdf.multi_cell(uw, 0.18 * spacing, sanitize(data['summary']))
             pdf.ln(0.1)
 
-        # 2. Education
         elif sec_key == 'core_Education':
-            pdf.section_header(data['heading_education'], accent)
+            pdf.set_font("Times", "B", f_size)
+            pdf.cell(uw, 0.2, data['heading_education'].upper(), ln=1)
+            pdf.line(m, pdf.get_y(), 8.5-m, pdf.get_y())
+            pdf.ln(0.05)
             for ed in data['education']:
                 if not ed.get('school'): continue
-                pdf.set_font("Times", "B", settings['font_size'])
-                pdf.cell(uw*0.75, 0.2, sanitize(ed['school']))
-                pdf.cell(uw*0.25, 0.2, sanitize(ed['location']), align="R", ln=1)
-                pdf.set_font("Times", "I", settings['font_size'])
-                pdf.cell(uw*0.75, 0.2, sanitize(ed['degree']))
-                pdf.cell(uw*0.25, 0.2, sanitize(ed['date']), align="R", ln=1)
+                if ed.get('force_page_break'): pdf.add_page()
+                pdf.set_font("Times", "B", f_size)
+                pdf.cell(uw*0.7, 0.18, sanitize(ed['school']))
+                pdf.cell(uw*0.3, 0.18, sanitize(ed.get('location', '')), align="R", ln=1)
+                pdf.set_font("Times", "I", f_size)
+                pdf.cell(uw*0.7, 0.18, sanitize(ed.get('degree', '')))
+                pdf.cell(uw*0.3, 0.18, sanitize(ed.get('date', '')), align="R", ln=1)
                 if ed.get('details'):
-                    pdf.set_font("Times", "", settings['font_size'])
-                    pdf.multi_cell(uw, 0.17, sanitize(ed['details']))
+                    pdf.set_font("Times", "", f_size)
+                    pdf.multi_cell(uw, 0.18, sanitize(ed['details']))
                 pdf.ln(0.05)
 
-        # 3. Experience / Leadership / Projects
         elif sec_key in ['core_Experience', 'core_Leadership', 'core_Projects']:
-            key_map = {'core_Experience': ('experience', 'company'), 'core_Leadership': ('leadership', 'organization'), 'core_Projects': ('projects', 'title')}
-            list_key, name_key = key_map[sec_key]
+            map_key = 'experience' if 'Experience' in sec_key else ('leadership' if 'Leadership' in sec_key else 'projects')
+            label = data[f'heading_{map_key}'].upper()
             
-            pdf.section_header(data[f'heading_{list_key}'], accent)
-            for item in data[list_key]:
-                if not item.get(name_key): continue
+            pdf.set_font("Times", "B", f_size)
+            pdf.cell(uw, 0.2, label, ln=1)
+            pdf.line(m, pdf.get_y(), 8.5-m, pdf.get_y())
+            pdf.ln(0.05)
+            
+            for item in data[map_key]:
+                name = item.get('company') or item.get('organization') or item.get('title')
+                if not name: continue
+                if item.get('force_page_break'): pdf.add_page()
                 
-                # Check for "Orphan" Prevention (estimate height)
-                if pdf.get_y() > 9.5: pdf.add_page() 
-
-                pdf.set_font("Times", "B", settings['font_size'])
-                pdf.cell(uw*0.75, 0.2, sanitize(item[name_key]))
-                pdf.cell(uw*0.25, 0.2, sanitize(item.get('location', '')), align="R", ln=1)
+                pdf.set_font("Times", "B", f_size)
+                pdf.cell(uw*0.7, 0.18, sanitize(name))
+                pdf.cell(uw*0.3, 0.18, sanitize(item.get('location', '')), align="R", ln=1)
                 
-                pdf.set_font("Times", "I", settings['font_size'])
-                pdf.cell(uw*0.75, 0.2, sanitize(item.get('title') or item.get('role', '')))
-                pdf.cell(uw*0.25, 0.2, sanitize(item.get('date', '')), align="R", ln=1)
+                pdf.set_font("Times", "I", f_size)
+                pdf.cell(uw*0.7, 0.18, sanitize(item.get('title') or item.get('role', '')))
+                pdf.cell(uw*0.3, 0.18, sanitize(item.get('date', '')), align="R", ln=1)
                 
-                pdf.set_font("Times", "", settings['font_size'])
-                for bullet in item.get('bullets', '').split('\n'):
-                    b = bullet.strip().lstrip('-').lstrip('•').strip()
-                    if not b: continue
+                pdf.set_font("Times", "", f_size)
+                bullets = item.get('bullets', '').split('\n')
+                for b in bullets:
+                    clean_b = b.strip().lstrip('-').lstrip('*').lstrip('•').strip()
+                    if not clean_b: continue
                     pdf.set_x(m + 0.15)
-                    pdf.cell(0.1, 0.18, "*")
+                    pdf.cell(0.1, 0.18, chr(149))
                     pdf.set_x(m + 0.3)
-                    pdf.multi_cell(uw - 0.3, 0.18 * settings['spacing'], sanitize(b))
-                pdf.ln(0.08)
+                    pdf.multi_cell(uw - 0.3, 0.18 * spacing, sanitize(clean_b))
+                pdf.ln(0.05)
 
-        # 4. Skills
         elif sec_key == 'core_Skills':
-            pdf.section_header(data['heading_skills'], accent)
-            pdf.set_font("Times", "", settings['font_size'])
+            pdf.set_font("Times", "B", f_size)
+            pdf.cell(uw, 0.2, data['heading_skills'].upper(), ln=1)
+            pdf.line(m, pdf.get_y(), 8.5-m, pdf.get_y())
+            pdf.ln(0.05)
             sk = data['skills']
-            parts = []
-            if sk['technical']: parts.append(f"Technical: {sk['technical']}")
-            if sk['languages']: parts.append(f"Languages: {sk['languages']}")
-            if sk['interests']: parts.append(f"Interests: {sk['interests']}")
-            pdf.multi_cell(uw, 0.18, sanitize(" | ".join(parts)))
+            pdf.set_font("Times", "", f_size)
+            lines = []
+            if sk.get('technical'): lines.append(f"**Technical Skills**: {sk['technical']}")
+            if sk.get('languages'): lines.append(f"**Languages**: {sk['languages']}")
+            if sk.get('interests'): lines.append(f"**Interests**: {sk['interests']}")
+            pdf.multi_cell(uw, 0.18 * spacing, sanitize("  \n".join(lines)), markdown=True)
 
     return pdf.output(dest='S'), pdf.page_no()
 
-# --- INITIALIZATION ---
+# --- STATE MANAGEMENT ---
 if 'r_data' not in st.session_state:
     st.session_state.r_data = {
-        'name': 'John Harvard', 'address': 'Cambridge, MA', 'phone': '617-555-0123', 'email': 'john@harvard.edu', 'linkedin': 'linkedin.com/in/johnh',
+        'name': 'Candidate Name', 'address': 'City, State', 'phone': '555-555-5555', 'email': 'email@example.com', 'linkedin': 'linkedin.com/in/user',
         'summary': '', 'heading_summary': 'Summary', 'heading_education': 'Education', 'heading_experience': 'Experience',
         'heading_projects': 'Projects', 'heading_leadership': 'Leadership', 'heading_skills': 'Skills & Interests',
-        'education': [{'school': 'Harvard University', 'location': 'Cambridge, MA', 'degree': 'B.A. Computer Science', 'date': 'May 2025', 'details': 'GPA: 4.0'}],
-        'experience': [{'company': 'Google', 'location': 'Mountain View, CA', 'title': 'Software Engineer Intern', 'date': 'Summer 2024', 'bullets': 'Improved latency by 20%.\nOptimized data pipelines.'}],
-        'projects': [], 'leadership': [], 'skills': {'technical': 'Python, C++, SQL', 'languages': 'English, Spanish', 'interests': 'Chess, Rowing'},
-        'custom_sections': []
+        'education': [{'school': '', 'location': '', 'degree': '', 'date': '', 'details': '', 'force_page_break': False}],
+        'experience': [{'company': '', 'location': '', 'title': '', 'date': '', 'bullets': '', 'force_page_break': False}],
+        'projects': [], 'leadership': [], 'skills': {'technical': '', 'languages': '', 'interests': ''}, 'custom_sections': []
     }
 if 'section_order' not in st.session_state:
     st.session_state.section_order = ['core_Summary', 'core_Education', 'core_Experience', 'core_Projects', 'core_Leadership', 'core_Skills']
 
 # --- UI LAYOUT ---
-st.title("🚀 Real-Time Harvard Resume Builder")
-st.caption("Edit on the left, see results instantly on the right. Accurate Harvard OCS Formatting.")
-
+st.title("🎓 Harvard Resume Maker (Live Preview)")
 editor_col, preview_col = st.columns([1, 1])
 
-# --- LEFT COLUMN: THE LIVE EDITOR ---
 with editor_col:
-    with st.expander("👤 Contact Information", expanded=True):
-        st.session_state.r_data['name'] = st.text_input("Full Name", st.session_state.r_data['name'])
+    tabs = st.tabs(["👤 Info", "🎓 Edu", "💼 Exp", "🛠️ Skills", "⚙️ Layout"])
+    
+    with tabs[0]:
+        st.session_state.r_data['name'] = st.text_input("Name", st.session_state.r_data['name'])
         c1, c2 = st.columns(2)
         st.session_state.r_data['email'] = c1.text_input("Email", st.session_state.r_data['email'])
         st.session_state.r_data['phone'] = c2.text_input("Phone", st.session_state.r_data['phone'])
-    
-    with st.expander("💼 Work Experience"):
-        for i, exp in enumerate(st.session_state.r_data['experience']):
-            st.markdown(f"**Job #{i+1}**")
-            exp['company'] = st.text_input("Company", exp['company'], key=f"comp_{i}")
-            exp['title'] = st.text_input("Title", exp['title'], key=f"tit_{i}")
-            exp['date'] = st.text_input("Date (e.g. May 2021 - Present)", exp['date'], key=f"date_{i}")
-            exp['bullets'] = st.text_area("Bullets (One per line)", exp['bullets'], key=f"bull_{i}", height=150)
-            if st.button(f"🗑️ Delete Job {i+1}", key=f"del_{i}"):
-                st.session_state.r_data['experience'].pop(i)
-                st.rerun()
-        if st.button("➕ Add Job"):
-            st.session_state.r_data['experience'].append({'company': '', 'location': '', 'title': '', 'date': '', 'bullets': ''})
+        st.session_state.r_data['address'] = c1.text_input("Location", st.session_state.r_data['address'])
+        st.session_state.r_data['linkedin'] = c2.text_input("LinkedIn", st.session_state.r_data['linkedin'])
+        st.session_state.r_data['summary'] = st.text_area("Summary", st.session_state.r_data['summary'], height=100)
+
+    with tabs[1]:
+        for i, ed in enumerate(st.session_state.r_data['education']):
+            with st.expander(f"School: {ed.get('school') or 'New'}", expanded=True):
+                ed['school'] = st.text_input("School", ed['school'], key=f"ed_s_{i}")
+                ed['degree'] = st.text_input("Degree", ed['degree'], key=f"ed_d_{i}")
+                ed['date'] = st.text_input("Date", ed['date'], key=f"ed_dt_{i}")
+                ed['force_page_break'] = st.checkbox("Push to Next Page", ed['force_page_break'], key=f"ed_pb_{i}")
+        if st.button("➕ Add Education"):
+            st.session_state.r_data['education'].append({'school': '', 'location': '', 'degree': '', 'date': '', 'details': '', 'force_page_break': False})
             st.rerun()
 
-    with st.expander("🎓 Education"):
-        for i, ed in enumerate(st.session_state.r_data['education']):
-            ed['school'] = st.text_input("School", ed['school'], key=f"sch_{i}")
-            ed['degree'] = st.text_input("Degree", ed['degree'], key=f"deg_{i}")
-            ed['date'] = st.text_input("Date", ed['date'], key=f"edate_{i}")
+    with tabs[2]:
+        for i, exp in enumerate(st.session_state.r_data['experience']):
+            with st.expander(f"Job: {exp.get('company') or 'New'}", expanded=True):
+                exp['company'] = st.text_input("Company", exp['company'], key=f"ex_c_{i}")
+                exp['title'] = st.text_input("Title", exp['title'], key=f"ex_t_{i}")
+                exp['date'] = st.text_input("Date", exp['date'], key=f"ex_dt_{i}")
+                exp['bullets'] = st.text_area("Bullets", exp['bullets'], key=f"ex_b_{i}", height=120)
+                exp['force_page_break'] = st.checkbox("Push to Next Page", exp['force_page_break'], key=f"ex_pb_{i}")
+                if st.button("✨ Polish (AI)", key=f"ai_{i}"):
+                    exp['bullets'] = polish_bullet_ai(exp['bullets'])
+                    st.rerun()
+        if st.button("➕ Add Job"):
+            st.session_state.r_data['experience'].append({'company': '', 'location': '', 'title': '', 'date': '', 'bullets': '', 'force_page_break': False})
+            st.rerun()
 
-    with st.expander("🛠️ Skills"):
-        st.session_state.r_data['skills']['technical'] = st.text_area("Technical", st.session_state.r_data['skills']['technical'])
-        st.session_state.r_data['skills']['interests'] = st.text_input("Interests", st.session_state.r_data['skills']['interests'])
+    with tabs[3]:
+        sk = st.session_state.r_data['skills']
+        sk['technical'] = st.text_area("Technical Skills", sk['technical'])
+        sk['languages'] = st.text_input("Languages", sk['languages'])
+        sk['interests'] = st.text_input("Interests", sk['interests'])
 
-    with st.expander("📏 Layout & Orphan Control"):
-        spacing = st.slider("Line Spacing", 0.7, 1.5, 1.0, 0.05)
-        margin = st.slider("Margins (in)", 0.4, 1.2, 0.75, 0.05)
-        font_sz = st.slider("Font Size", 9, 12, 11)
+    with tabs[4]:
+        margin = st.slider("Margins (in)", 0.4, 1.0, 0.75, 0.05)
+        font_size = st.slider("Font Size", 9, 12, 11)
+        spacing = st.slider("Line Spacing", 0.8, 1.2, 1.0, 0.05)
 
-# --- RIGHT COLUMN: INSTANT PREVIEW ---
+# --- PREVIEW RENDER ---
 with preview_col:
     settings = {
-        'margin': margin, 'font_size': font_sz, 'header_size': 16, 
-        'spacing': spacing, 'accent_rgb': (0,0,0), 
-        'section_order': st.session_state.section_order, 'paper_size': 'Letter'
+        'margin': margin, 'font_size': font_size, 'spacing': spacing,
+        'accent_rgb': (0,0,0), 'section_order': st.session_state.section_order
     }
     
-    # Generate PDF in memory
-    try:
-        pdf_bytes, page_count = generate_pdf(st.session_state.r_data, settings)
-        
-        # Warning if overflowing to 2nd page unintentionally
-        if page_count > 1:
-            st.warning(f"⚠️ Resume is currently {page_count} pages. Adjust spacing or bullets to fit.")
-        else:
-            st.success("✅ Fits on 1 page.")
+    pdf_bytes, pages = generate_harvard_pdf(st.session_state.r_data, settings)
+    
+    if pages > 1:
+        st.warning(f"Note: Your resume is {pages} pages long.")
+    
+    # PDF to Base64 for Browser Preview
+    base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
+    pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="900px" type="application/pdf"></iframe>'
+    st.markdown(pdf_display, unsafe_allow_html=True)
+    
+    st.download_button("⬇️ Download PDF", data=pdf_bytes, file_name="Harvard_Resume.pdf", mime="application/pdf")
 
-        # Display PDF
-        base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
-        pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="1000px" type="application/pdf"></iframe>'
-        st.markdown(pdf_display, unsafe_allow_html=True)
-        
-        st.download_button("⬇️ Download PDF", data=pdf_bytes, file_name="Resume.pdf", mime="application/pdf")
-    except Exception as e:
-        st.error(f"Preview Error: {e}")
-
-# --- AI POLISH FLOATING BUTTON ---
-if st.sidebar.button("✨ Auto-Polish with AI"):
-    with st.spinner("AI is rewriting your bullets for impact..."):
-        for exp in st.session_state.r_data['experience']:
-            if exp['bullets']:
-                prompt = f"Rewrite these resume bullets using the STAR method and strong action verbs: {exp['bullets']}"
-                res = client.chat.completions.create(model="llama-3.3-70b-versatile", messages=[{"role": "user", "content": prompt}])
-                exp['bullets'] = res.choices[0].message.content
+# Sidebar Export/Import
+with st.sidebar:
+    st.header("💾 Data Management")
+    st.download_button("Download JSON Data", data=json.dumps(strip_internal_ids(st.session_state.r_data)), file_name="resume.json")
+    up = st.file_uploader("Upload JSON Data")
+    if up:
+        st.session_state.r_data = json.load(up)
         st.rerun()
